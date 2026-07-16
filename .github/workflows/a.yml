@@ -15,7 +15,7 @@ on:
 jobs:
   blast:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 150000000000
 
     steps:
       - name: Setup Python

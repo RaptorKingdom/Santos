@@ -1,4 +1,4 @@
-name: "Infinite Vote Storm with Live Stats"
+name: Infinite Vote Storm with Live Stats
 
 on:
   workflow_dispatch:

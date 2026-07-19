@@ -1,10 +1,10 @@
-name: Infinite Vote Storm with Live Stats
+name: "Infinite Vote Storm with Live Stats"
 
 on:
   workflow_dispatch:
     inputs:
       concurrency:
-        description: 'تعداد اتصال همزمان'
+        description: 'Concurrent connections'
         required: true
         default: '60'
 
@@ -248,7 +248,7 @@ jobs:
           async def heartbeat():
               while True:
                   await asyncio.sleep(120)
-                  print(f"💓 Heartbeat: زنده و فعال - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                  print(f"Heartbeat: alive - {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
           async def update_stats_files(stats, proxy_count, start_time):
               while True:
@@ -271,48 +271,45 @@ jobs:
                   with open("stats.json", "w") as f:
                       json.dump(data, f, indent=2)
 
-                  readme = f"""# ⚡ Infinite Vote Storm Stats
+                  readme = f"""# Vote Storm Stats
 
-**Last updated:** {data['last_updated']}  
-**Runtime:** {elapsed/3600:.1f} hours  
+          **Last updated:** {data['last_updated']}  
+          **Runtime:** {elapsed/3600:.1f} hours  
 
-| Metric | Value |
-|--------|-------|
-| ✅ Successful votes | **{stats['success']:,}** |
-| ❌ Failed attempts | {stats['failed']:,} |
-| 📝 Total requests | {total:,} |
-| 📈 Success rate | {success_rate:.1f}% |
-| ⚡ Speed | {rate:.2f} req/s |
-| 🔁 Active proxies | {proxy_count:,} |
+          | Metric | Value |
+          |--------|-------|
+          | Successful votes | **{stats['success']:,}** |
+          | Failed attempts | {stats['failed']:,} |
+          | Total requests | {total:,} |
+          | Success rate | {success_rate:.1f}% |
+          | Speed | {rate:.2f} req/s |
+          | Active proxies | {proxy_count:,} |
 
-> Auto-updated every 5 minutes by GitHub Actions.
-"""
+          > Auto-updated every 5 minutes by GitHub Actions.
+          """
                   with open("README.md", "w") as f:
                       f.write(readme)
 
-                  print(f"📝 فایل‌های stats.json و README.md بروزرسانی شدند.")
+                  print("Stats files updated.")
 
           async def main():
               concurrency = int(os.getenv("CONCURRENCY", 60))
 
-              print("🚀 شروع عملیات رأی‌دهی بی‌نهایت با هدرهای صحیح")
-              print(f"📌 Origin: https://mehdijahaan.com")
-              print(f"📌 تعداد اتصال همزمان: {concurrency}")
-              print(f"📌 محدودیت زمانی: ۶ ساعت (راه‌اندازی مجدد خودکار)")
-              print(f"📌 استراتژی: یکبار جمع‌آوری پروکسی، سپس رأی‌دهی بی‌وقفه\n")
+              print("Starting infinite vote storm")
+              print(f"Origin: https://mehdijahaan.com")
+              print(f"Concurrency: {concurrency}")
+              print("Max runtime: 6 hours\n")
 
               start_time = time.time()
               max_runtime = 6 * 3600 - 120
 
-              print("📥 در حال جمع‌آوری تمام پروکسی‌ها از همه منابع...")
-              print("⏳ این کار ممکن است چند دقیقه طول بکشد...")
+              print("Gathering proxies...")
               proxy_list = await gather_all_proxies()
               proxy_count = len(proxy_list)
-              print(f"✅ {proxy_count:,} پروکسی جمع‌آوری شد!")
-              print(f"🎯 شروع رأی‌دهی بی‌وقفه...\n")
+              print(f"Proxies collected: {proxy_count:,}\n")
 
               if not proxy_list:
-                  print("❌ هیچ پروکسی پیدا نشد!")
+                  print("No proxies found!")
                   return
 
               stats = {'success': 0, 'failed': 0}
@@ -345,17 +342,9 @@ jobs:
 
               elapsed = time.time() - start_time
               total = stats['success'] + stats['failed']
-              print(f"\n{'='*60}")
-              print(f"🎯 عملیات ۶ ساعته به پایان رسید")
-              print(f"   ✅ رأی موفق:    {stats['success']:,}")
-              print(f"   ❌ رأی ناموفق:  {stats['failed']:,}")
-              print(f"   📝 کل تلاش‌ها:  {total:,}")
-              print(f"   ⏱️ زمان:        {elapsed/3600:.1f} ساعت")
-              print(f"   ⚡ سرعت متوسط:  {total/elapsed:.2f} req/s")
-              print(f"   🔄 راه‌اندازی مجدد خودکار با workflow بعدی...")
-              print(f"{'='*60}\n")
+              print(f"\nDone. Success: {stats['success']:,}, Failed: {stats['failed']:,}, Total: {total:,}, Time: {elapsed/3600:.1f}h")
 
-              # ذخیره نهایی آمار
+              # Final save
               with open("stats.json", "w") as f:
                   json.dump({
                       "success": stats['success'],
@@ -368,22 +357,8 @@ jobs:
                       "last_updated": time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
                   }, f, indent=2)
 
-              readme = f"""# ⚡ Infinite Vote Storm Stats (Final)
-
-**Last updated:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  
-**Runtime:** {elapsed/3600:.1f} hours  
-
-| Metric | Value |
-|--------|-------|
-| ✅ Successful votes | **{stats['success']:,}** |
-| ❌ Failed attempts | {stats['failed']:,} |
-| 📝 Total requests | {total:,} |
-| 📈 Success rate | {(stats['success']/total*100):.1f}% |
-| ⚡ Speed | {total/elapsed:.2f} req/s |
-| 🔁 Active proxies | {proxy_count:,} |
-"""
               with open("README.md", "w") as f:
-                  f.write(readme)
+                  f.write(f"# Final Stats\n\nSuccess: {stats['success']:,}\nFailed: {stats['failed']:,}\nTotal: {total:,}\nTime: {elapsed/3600:.1f}h")
 
           if __name__ == "__main__":
               asyncio.run(main())
@@ -396,12 +371,11 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          # حلقه commit خودکار هر ۵ دقیقه
           while true; do
             sleep 300
             git add README.md stats.json
             if ! git diff --staged --quiet; then
-              git commit -m "📊 Update live stats [skip ci]"
+              git commit -m "Update live stats [skip ci]"
               git push
             fi
           done &
@@ -412,7 +386,7 @@ jobs:
           kill $BG_PID 2>/dev/null
           git add README.md stats.json
           if ! git diff --staged --quiet; then
-            git commit -m "📊 Final stats [skip ci]"
+            git commit -m "Final stats [skip ci]"
             git push
           fi
 

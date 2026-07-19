@@ -1,4 +1,4 @@
-name: ⚡ Infinite Vote Storm with Live Stats
+name: "Infinite Vote Storm with Live Stats"
 
 on:
   workflow_dispatch:
@@ -25,37 +25,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install aiohttp aiohttp_socks beautifulsoup4 lxml
-
-      - name: Run voter with auto-commit
-        env:
-          CONCURRENCY: ${{ github.event.inputs.concurrency }}
-        run: |
-          # پیکربندی git
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          # حلقه commit خودکار در پس‌زمینه (هر ۵ دقیقه)
-          while true; do
-            sleep 300
-            git add README.md stats.json
-            if ! git diff --staged --quiet; then
-              git commit -m "📊 Update live stats [skip ci]"
-              git push
-            fi
-          done &
-          BG_PID=$!
-
-          # اجرای اسکریپت رأی‌گیری (تا ۶ ساعت)
-          python infinite_voter.py
-
-          # پایان اسکریپت: یک بار دیگر commit و push نهایی
-          kill $BG_PID 2>/dev/null
-          git add README.md stats.json
-          if ! git diff --staged --quiet; then
-            git commit -m "📊 Final stats [skip ci]"
-            git push
-          fi
-        shell: bash
 
       - name: Create Python script
         run: |
@@ -282,15 +251,13 @@ jobs:
                   print(f"💓 Heartbeat: زنده و فعال - {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
           async def update_stats_files(stats, proxy_count, start_time):
-              """هر ۵ دقیقه فایل‌های stats.json و README.md را به‌روز می‌کند"""
               while True:
-                  await asyncio.sleep(300)  # هر ۵ دقیقه
+                  await asyncio.sleep(300)
                   elapsed = time.time() - start_time
                   total = stats['success'] + stats['failed']
                   rate = total / elapsed if elapsed > 0 else 0
                   success_rate = (stats['success'] / total * 100) if total > 0 else 0
 
-                  # نوشتن stats.json
                   data = {
                       "success": stats['success'],
                       "failed": stats['failed'],
@@ -304,23 +271,22 @@ jobs:
                   with open("stats.json", "w") as f:
                       json.dump(data, f, indent=2)
 
-                  # نوشتن README.md با آمار زیبا
                   readme = f"""# ⚡ Infinite Vote Storm Stats
 
-                  **Last updated:** {data['last_updated']}  
-                  **Runtime:** {elapsed/3600:.1f} hours  
+**Last updated:** {data['last_updated']}  
+**Runtime:** {elapsed/3600:.1f} hours  
 
-                  | Metric | Value |
-                  |--------|-------|
-                  | ✅ Successful votes | **{stats['success']:,}** |
-                  | ❌ Failed attempts | {stats['failed']:,} |
-                  | 📝 Total requests | {total:,} |
-                  | 📈 Success rate | {success_rate:.1f}% |
-                  | ⚡ Speed | {rate:.2f} req/s |
-                  | 🔁 Active proxies | {proxy_count:,} |
+| Metric | Value |
+|--------|-------|
+| ✅ Successful votes | **{stats['success']:,}** |
+| ❌ Failed attempts | {stats['failed']:,} |
+| 📝 Total requests | {total:,} |
+| 📈 Success rate | {success_rate:.1f}% |
+| ⚡ Speed | {rate:.2f} req/s |
+| 🔁 Active proxies | {proxy_count:,} |
 
-                  > This file is auto-generated every 5 minutes by the GitHub Actions workflow.
-                  """
+> Auto-updated every 5 minutes by GitHub Actions.
+"""
                   with open("README.md", "w") as f:
                       f.write(readme)
 
@@ -352,7 +318,6 @@ jobs:
               stats = {'success': 0, 'failed': 0}
               sem = asyncio.Semaphore(concurrency)
 
-              # وظایف پس‌زمینه
               heart_task = asyncio.create_task(heartbeat())
               updater_task = asyncio.create_task(update_stats_files(stats, proxy_count, start_time))
 
@@ -390,28 +355,76 @@ jobs:
               print(f"   🔄 راه‌اندازی مجدد خودکار با workflow بعدی...")
               print(f"{'='*60}\n")
 
-              # نوشتن نهایی آمار قبل از خروج
-              await update_stats_files.__wrapped__(stats, proxy_count, start_time) if hasattr(update_stats_files, '__wrapped__') else None
+              # ذخیره نهایی آمار
+              with open("stats.json", "w") as f:
+                  json.dump({
+                      "success": stats['success'],
+                      "failed": stats['failed'],
+                      "total": total,
+                      "rate": round(total/elapsed, 2),
+                      "success_rate": round((stats['success']/total*100), 1) if total else 0,
+                      "runtime_seconds": round(elapsed),
+                      "proxy_count": proxy_count,
+                      "last_updated": time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
+                  }, f, indent=2)
+
+              readme = f"""# ⚡ Infinite Vote Storm Stats (Final)
+
+**Last updated:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  
+**Runtime:** {elapsed/3600:.1f} hours  
+
+| Metric | Value |
+|--------|-------|
+| ✅ Successful votes | **{stats['success']:,}** |
+| ❌ Failed attempts | {stats['failed']:,} |
+| 📝 Total requests | {total:,} |
+| 📈 Success rate | {(stats['success']/total*100):.1f}% |
+| ⚡ Speed | {total/elapsed:.2f} req/s |
+| 🔁 Active proxies | {proxy_count:,} |
+"""
+              with open("README.md", "w") as f:
+                  f.write(readme)
 
           if __name__ == "__main__":
               asyncio.run(main())
           PYEOF
 
-          # حالا اسکریپت را اجرا می‌کنیم
+      - name: Run voter with auto-commit
+        env:
+          CONCURRENCY: ${{ github.event.inputs.concurrency }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # حلقه commit خودکار هر ۵ دقیقه
+          while true; do
+            sleep 300
+            git add README.md stats.json
+            if ! git diff --staged --quiet; then
+              git commit -m "📊 Update live stats [skip ci]"
+              git push
+            fi
+          done &
+          BG_PID=$!
+
           python infinite_voter.py
+
+          kill $BG_PID 2>/dev/null
+          git add README.md stats.json
+          if ! git diff --staged --quiet; then
+            git commit -m "📊 Final stats [skip ci]"
+            git push
+          fi
 
   auto-restart:
     needs: vote-infinite
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Trigger Next Run
+      - name: Trigger next run
         run: |
           curl -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/a.yml/dispatches" \
             -d '{"ref":"${{ github.ref }}", "inputs":{"concurrency":"${{ github.event.inputs.concurrency }}"}}'

@@ -73,12 +73,9 @@ jobs:
                       line = line.strip()
                       if not line or line.startswith('#'):
                           continue
-                      # Keep lines with or without prefix
                       proxies.add(line)
-              # Remove invalid local IPs
               clean = set()
               for p in proxies:
-                  # Extract ip:port
                   match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)', p)
                   if match:
                       ip = match.group(1)
@@ -97,7 +94,6 @@ jobs:
               elif proxy_str.startswith("https://"):
                   return ProxyType.HTTP, proxy_str
               else:
-                  # Assume plain IP:port -> try HTTP
                   return ProxyType.HTTP, f"http://{proxy_str}"
 
           async def vote(session, proxy_str, sem, stats):
@@ -164,21 +160,21 @@ jobs:
 
                   readme = f"""# Vote Storm Stats (Single Source)
 
-**Last updated:** {data['last_updated']}  
-**Runtime:** {elapsed/3600:.1f} hours  
+          **Last updated:** {data['last_updated']}  
+          **Runtime:** {elapsed/3600:.1f} hours  
 
-| Metric | Value |
-|--------|-------|
-| ✅ Successful votes | **{stats['success']:,}** |
-| ❌ Failed attempts | {stats['failed']:,} |
-| 📝 Total requests | {total:,} |
-| 📈 Success rate | {success_rate:.1f}% |
-| ⚡ Speed | {rate:.2f} req/s |
-| 🔁 Proxies loaded | {proxy_count:,} |
+          | Metric | Value |
+          |--------|-------|
+          | ✅ Successful votes | **{stats['success']:,}** |
+          | ❌ Failed attempts | {stats['failed']:,} |
+          | 📝 Total requests | {total:,} |
+          | 📈 Success rate | {success_rate:.1f}% |
+          | ⚡ Speed | {rate:.2f} req/s |
+          | 🔁 Proxies loaded | {proxy_count:,} |
 
-> Proxies from: {PROXY_URL}  
-> Auto-updated every 5 minutes.
-"""
+          > Proxies from: {PROXY_URL}  
+          > Auto-updated every 5 minutes.
+          """
                   with open("README.md", "w") as f:
                       f.write(readme)
 
@@ -237,7 +233,6 @@ jobs:
               total = stats['success'] + stats['failed']
               print(f"\nDone. Success: {stats['success']:,}, Failed: {stats['failed']:,}, Total: {total:,}, Time: {elapsed/3600:.1f}h")
 
-              # Final save
               with open("stats.json", "w") as f:
                   json.dump({
                       "success": stats['success'],

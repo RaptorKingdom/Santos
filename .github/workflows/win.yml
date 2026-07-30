@@ -1,4 +1,4 @@
-name: Windows RDP Tunnel (bore - No Signup)
+name: Windows RDP (Auto TCP Tunnel)
 
 on:
   workflow_dispatch:
@@ -39,32 +39,93 @@ jobs:
             exit 1
           }
 
-      - name: Download and start bore tunnel
+      - name: Download tunnel tool (bore or expose)
         shell: powershell
         run: |
-          $boreUrl = "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-x86_64-pc-windows-msvc.exe"
-          Invoke-WebRequest -Uri $boreUrl -OutFile "bore.exe"
-          if (-not (Test-Path "bore.exe")) {
-            Write-Host "ERROR: bore download failed."
+          $tool = $null
+          $dlUrl = $null
+
+          # 1. تلاش برای دریافت آخرین نسخه bore
+          try {
+            Write-Host "Trying to download bore..."
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ekzhang/bore/releases/latest"
+            $asset = $release.assets | Where-Object { $_.name -like "*windows-msvc.exe" } | Select-Object -First 1
+            if ($asset) {
+              $dlUrl = $asset.browser_download_url
+              $tool = "bore"
+            }
+          } catch {
+            Write-Host "bore API failed: $_"
+          }
+
+          # 2. اگر bore در دسترس نبود، از expose استفاده کن
+          if (-not $dlUrl) {
+            Write-Host "bore not available. Falling back to expose..."
+            try {
+              $release = Invoke-RestMethod -Uri "https://api.github.com/repos/kernelshard/expose/releases/latest"
+              $asset = $release.assets | Where-Object { $_.name -like "*windows-amd64.exe" } | Select-Object -First 1
+              if ($asset) {
+                $dlUrl = $asset.browser_download_url
+                $tool = "expose"
+              }
+            } catch {
+              Write-Host "expose API failed: $_"
+            }
+          }
+
+          if (-not $dlUrl) {
+            Write-Host "ERROR: No tunnel tool available."
             exit 1
           }
-          Write-Host "bore downloaded."
 
-          $outLog = "bore_out.log"
-          $errLog = "bore_err.log"
-          Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-            -ArgumentList "local", "3389", "--to", "bore.pub" `
-            -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+          Write-Host "Downloading $tool from $dlUrl"
+          Invoke-WebRequest -Uri $dlUrl -OutFile "tunnel.exe"
+          if (-not (Test-Path "tunnel.exe")) {
+            Write-Host "ERROR: Download failed."
+            exit 1
+          }
+          Write-Host "$tool downloaded."
+
+          # ذخیره نام ابزار برای استفاده بعدی
+          $tool | Out-File -FilePath tool_name.txt -Encoding utf8
+
+      - name: Start tunnel
+        shell: powershell
+        run: |
+          $tool = Get-Content tool_name.txt -Raw
+          $outLog = "tunnel_out.log"
+          $errLog = "tunnel_err.log"
+
+          if ($tool -eq "bore") {
+            Write-Host "Starting bore tunnel..."
+            Start-Process -NoNewWindow -FilePath ".\tunnel.exe" `
+              -ArgumentList "local", "3389", "--to", "bore.pub" `
+              -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+          } elseif ($tool -eq "expose") {
+            Write-Host "Starting expose tunnel..."
+            Start-Process -NoNewWindow -FilePath ".\tunnel.exe" `
+              -ArgumentList "tunnel", "--port", "3389" `
+              -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+          } else {
+            Write-Host "ERROR: Unknown tool $tool"
+            exit 1
+          }
 
           Write-Host "Waiting for tunnel..."
           Start-Sleep -Seconds 8
 
+          $tunnelHost = $null
           $tunnelPort = $null
           for ($i=1; $i -le 10; $i++) {
             if (Test-Path $outLog) {
               $content = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-              if ($content -match 'listening on\s+[\w\.]+:(\d+)') {
-                $tunnelPort = $matches[1]
+              if ($tool -eq "bore" -and $content -match 'listening on\s+([\w\.]+):(\d+)') {
+                $tunnelHost = $matches[1]
+                $tunnelPort = $matches[2]
+                break
+              } elseif ($tool -eq "expose" -and $content -match 'tcp://([\w\.]+):(\d+)') {
+                $tunnelHost = $matches[1]
+                $tunnelPort = $matches[2]
                 break
               }
             }
@@ -73,7 +134,7 @@ jobs:
           }
 
           if (-not $tunnelPort) {
-            Write-Host "ERROR: Could not extract port."
+            Write-Host "ERROR: Could not extract host/port."
             Write-Host "=== stdout ==="
             if (Test-Path $outLog) { Get-Content $outLog }
             Write-Host "=== stderr ==="
@@ -82,7 +143,7 @@ jobs:
           }
 
           @"
-          host=bore.pub
+          host=$tunnelHost
           port=$tunnelPort
           "@ | Out-File -FilePath connection.txt -Encoding utf8
 
@@ -119,11 +180,17 @@ jobs:
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
             if ((Get-Date).Minute % 5 -eq 0) {
-              $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-              if (-not $boreProc) {
+              $proc = Get-Process -Name "tunnel" -ErrorAction SilentlyContinue
+              if (-not $proc) {
                 Write-Host "Tunnel lost. Restarting..."
-                Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-                  -ArgumentList "local", "3389", "--to", "bore.pub"
+                $tool = Get-Content tool_name.txt -Raw
+                if ($tool -eq "bore") {
+                  Start-Process -NoNewWindow -FilePath ".\tunnel.exe" `
+                    -ArgumentList "local", "3389", "--to", "bore.pub"
+                } else {
+                  Start-Process -NoNewWindow -FilePath ".\tunnel.exe" `
+                    -ArgumentList "tunnel", "--port", "3389"
+                }
               }
             }
             Start-Sleep -Seconds 60

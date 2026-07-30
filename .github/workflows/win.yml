@@ -1,4 +1,4 @@
-name: Windows RDP for Android (No Unicode)
+name: Windows RDP for Android (Fixed)
 
 on:
   workflow_dispatch:
@@ -14,26 +14,23 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Create user and enable RDP
-        shell: powershell
+      - name: Enable RDP and create user
+        shell: cmd
         run: |
-          # Enable RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          :: Enable RDP
+          reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          netsh advfirewall firewall set rule group="Remote Desktop" new enable=yes
+          reg add "HKLM\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
 
-          # Create user from Secrets
-          $username = "${{ secrets.RDP_USERNAME }}"
-          $password = ConvertTo-SecureString "${{ secrets.RDP_PASSWORD }}" -AsPlainText -Force
+          :: Create user with password from secrets
+          net user %RDP_USERNAME% %RDP_PASSWORD% /add /fullname:"Remote Desktop User"
+          net localgroup Administrators %RDP_USERNAME% /add
+          net localgroup "Remote Desktop Users" %RDP_USERNAME% /add
 
-          # Remove user if exists (for re-runs)
-          Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
-
-          New-LocalUser -Name $username -Password $password -FullName "Remote Desktop User"
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-
-          Write-Host "User $username created and RDP enabled."
+          echo User %RDP_USERNAME% created and RDP enabled.
+        env:
+          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
       - name: Download cloudflared
         shell: powershell
@@ -71,11 +68,9 @@ jobs:
             exit 1
           }
 
-          # Save connection details
           @"
           host=$tcpHost
           port=$tcpPort
-          username=${{ secrets.RDP_USERNAME }}
           "@ | Out-File -FilePath connection.txt -Encoding utf8
 
           Write-Host "Tunnel established."
@@ -90,13 +85,13 @@ jobs:
           Write-Host "======================================================"
           Write-Host "  Host: $($details.host)"
           Write-Host "  Port: $($details.port)"
-          Write-Host "  Username: $($details.username)"
+          Write-Host "  Username: ${{ secrets.RDP_USERNAME }}"
           Write-Host "  Password: (your secret)"
           Write-Host "======================================================"
           Write-Host ""
           Write-Host "In Microsoft Remote Desktop on Android:"
           Write-Host "  PC Name: $($details.host):$($details.port)"
-          Write-Host "  User Name: $($details.username)"
+          Write-Host "  User Name: ${{ secrets.RDP_USERNAME }}"
           Write-Host ""
 
       - name: Keep session alive
@@ -110,7 +105,6 @@ jobs:
             $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
-            # Restart tunnel if dead
             if ((Get-Date).Minute % 5 -eq 0) {
               $cf = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
               if (-not $cf) {

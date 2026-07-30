@@ -1,4 +1,4 @@
-name: Windows RDP via localhost.run (Fixed)
+name: Windows RDP via bore (No Signup, TCP Tunnel)
 
 on:
   workflow_dispatch:
@@ -39,48 +39,64 @@ jobs:
             exit 1
           }
 
-      - name: Start SSH reverse tunnel via localhost.run
+      - name: Download bore
         shell: powershell
         run: |
-          $sshLog = "ssh_stdout.log"
-          $sshErr = "ssh_stderr.log"
+          # آخرین نسخه bore را از GitHub دریافت کن
+          $releaseUrl = "https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri $releaseUrl -OutFile "bore.zip"
+          Expand-Archive bore.zip -DestinationPath .
+          # bore.exe داخل پوشه جدید خواهد بود
+          $boreExe = Get-ChildItem -Recurse -Filter "bore.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $boreExe) {
+            Write-Host "ERROR: bore.exe not found!"
+            exit 1
+          }
+          # کپی به ریشه برای دسترسی آسان
+          Copy-Item $boreExe -Destination .\bore.exe
+          Write-Host "bore downloaded successfully."
 
-          # اجرای SSH در بک‌گراند با فایل‌های جداگانه
-          Start-Process -NoNewWindow -FilePath "ssh" `
-            -ArgumentList "-o", "StrictHostKeyChecking=no", "-R", "0:localhost:3389", "nokey@localhost.run" `
-            -RedirectStandardOutput $sshLog -RedirectStandardError $sshErr
+      - name: Start bore tunnel for RDP
+        shell: powershell
+        run: |
+          $boreLog = "bore.log"
+          $boreErr = "bore_err.log"
 
-          Write-Host "Waiting for tunnel to establish..."
-          Start-Sleep -Seconds 10
+          # اجرای bore با سرور عمومی bore.pub (بدون ثبت‌نام)
+          Start-Process -NoNewWindow -FilePath ".\bore.exe" `
+            -ArgumentList "local", "3389", "--to", "bore.pub" `
+            -RedirectStandardOutput $boreLog -RedirectStandardError $boreErr
 
-          $tunnelHost = $null
-          $tunnelPort = $null
+          Write-Host "Waiting for tunnel..."
+          Start-Sleep -Seconds 8
+
+          $boreHost = "bore.pub"
+          $borePort = $null
           for ($i=1; $i -le 10; $i++) {
-            if (Test-Path $sshLog) {
-              $content = Get-Content $sshLog -Raw -ErrorAction SilentlyContinue
-              if ($content -match 'Connect to\s+([\d\.]+)\s+port\s+(\d+)') {
-                $tunnelHost = $matches[1]
-                $tunnelPort = $matches[2]
+            if (Test-Path $boreLog) {
+              $content = Get-Content $boreLog -Raw -ErrorAction SilentlyContinue
+              # الگوی خروجی: "listening on bore.pub:12345"
+              if ($content -match 'listening on\s+[\w\.]+:(\d+)') {
+                $borePort = $matches[1]
                 break
               }
             }
-            # همچنین stderr را برای دیباگ بررسی کن
             Write-Host "Attempt $i/10..."
             Start-Sleep -Seconds 5
           }
 
-          if (-not $tunnelHost) {
-            Write-Host "ERROR: Could not get tunnel info."
+          if (-not $borePort) {
+            Write-Host "ERROR: Could not extract port."
             Write-Host "=== STDOUT ==="
-            if (Test-Path $sshLog) { Get-Content $sshLog }
+            if (Test-Path $boreLog) { Get-Content $boreLog }
             Write-Host "=== STDERR ==="
-            if (Test-Path $sshErr) { Get-Content $sshErr }
+            if (Test-Path $boreErr) { Get-Content $boreErr }
             exit 1
           }
 
           @"
-          host=$tunnelHost
-          port=$tunnelPort
+          host=$boreHost
+          port=$borePort
           "@ | Out-File -FilePath connection.txt -Encoding utf8
 
           Write-Host "Tunnel established."
@@ -116,11 +132,11 @@ jobs:
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
             if ((Get-Date).Minute % 5 -eq 0) {
-              $sshProc = Get-Process -Name "ssh" -ErrorAction SilentlyContinue
-              if (-not $sshProc) {
-                Write-Host "SSH tunnel lost. Restarting..."
-                Start-Process -NoNewWindow -FilePath "ssh" `
-                  -ArgumentList "-o", "StrictHostKeyChecking=no", "-R", "0:localhost:3389", "nokey@localhost.run"
+              $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
+              if (-not $boreProc) {
+                Write-Host "Tunnel lost. Restarting..."
+                Start-Process -NoNewWindow -FilePath ".\bore.exe" `
+                  -ArgumentList "local", "3389", "--to", "bore.pub"
               }
             }
             Start-Sleep -Seconds 60

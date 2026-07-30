@@ -1,4 +1,4 @@
-name: Windows RDP for Android (Stable)
+name: Windows RDP via ngrok (No Token)
 
 on:
   workflow_dispatch:
@@ -17,75 +17,72 @@ jobs:
       - name: Enable RDP and create user
         shell: powershell
         run: |
-          # Enable RDP
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="Remote Desktop" new enable=yes
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
 
-          # Create user from Secrets
           $username = "${{ secrets.RDP_USERNAME }}"
           $password = "${{ secrets.RDP_PASSWORD }}"
 
-          # Check if user exists and remove
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name $username
           }
 
-          # Create user
           try {
             $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-            New-LocalUser -Name $username -Password $securePass -FullName "Remote Desktop User" -ErrorAction Stop
+            New-LocalUser -Name $username -Password $securePass -FullName "Remote Desktop User"
             Add-LocalGroupMember -Group "Administrators" -Member $username
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
             Write-Host "User $username created and RDP enabled."
           } catch {
-            Write-Host "ERROR: Failed to create user. $_"
-            Write-Host "Check that the password does NOT contain the username and meets complexity requirements."
+            Write-Host "ERROR: $_"
             exit 1
           }
 
-      - name: Download cloudflared
+      - name: Download and setup ngrok
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
-          Write-Host "cloudflared downloaded."
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive ngrok.zip -DestinationPath .
+          Write-Host "ngrok downloaded."
 
-      - name: Start Cloudflare Tunnel for RDP
+      - name: Start ngrok TCP tunnel for RDP
         shell: powershell
         run: |
-          Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" `
-            -ArgumentList "tunnel", "--url", "tcp://localhost:3389", "--no-autoupdate" `
-            -RedirectStandardOutput "tunnel.log" -RedirectStandardError "tunnel_error.log"
+          Start-Process -NoNewWindow -FilePath ".\ngrok\ngrok.exe" `
+            -ArgumentList "tcp", "3389", "--log=stdout" `
+            -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok_err.log"
 
-          Write-Host "Waiting for tunnel URL..."
-          Start-Sleep -Seconds 15
+          Write-Host "Waiting for ngrok URL..."
+          Start-Sleep -Seconds 10
 
-          $tcpHost = $null
-          $tcpPort = $null
-          for ($i=1; $i -le 6; $i++) {
-            $log = Get-Content tunnel.log -Raw -ErrorAction SilentlyContinue
-            if ($log -match 'tcp://([^:]+):(\d+)') {
-              $tcpHost = $matches[1]
-              $tcpPort = $matches[2]
+          $ngrokHost = $null
+          $ngrokPort = $null
+          for ($i=1; $i -le 8; $i++) {
+            $log = Get-Content ngrok.log -Raw -ErrorAction SilentlyContinue
+            # الگوی جدید ngrok: tcp://0.tcp.ngrok.io:12345
+            if ($log -match 'url=tcp://([^:]+):(\d+)') {
+              $ngrokHost = $matches[1]
+              $ngrokPort = $matches[2]
               break
             }
-            Write-Host "Attempt $i/6..."
+            Write-Host "Attempt $i/8..."
             Start-Sleep -Seconds 5
           }
 
-          if (-not $tcpHost) {
-            Write-Host "ERROR: Could not extract tunnel URL."
-            Get-Content tunnel.log
-            Get-Content tunnel_error.log
+          if (-not $ngrokHost) {
+            Write-Host "ERROR: Could not extract ngrok URL."
+            Get-Content ngrok.log
+            Get-Content ngrok_err.log
             exit 1
           }
 
           @"
-          host=$tcpHost
-          port=$tcpPort
+          host=$ngrokHost
+          port=$ngrokPort
           "@ | Out-File -FilePath connection.txt -Encoding utf8
 
-          Write-Host "Tunnel established."
+          Write-Host "ngrok tunnel established."
 
       - name: Display connection information
         shell: powershell
@@ -118,11 +115,11 @@ jobs:
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
             if ((Get-Date).Minute % 5 -eq 0) {
-              $cf = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
-              if (-not $cf) {
-                Write-Host "Tunnel lost. Restarting..."
-                Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" `
-                  -ArgumentList "tunnel", "--url", "tcp://localhost:3389", "--no-autoupdate"
+              $ng = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+              if (-not $ng) {
+                Write-Host "ngrok lost. Restarting..."
+                Start-Process -NoNewWindow -FilePath ".\ngrok\ngrok.exe" `
+                  -ArgumentList "tcp", "3389", "--log=stdout"
               }
             }
             Start-Sleep -Seconds 60

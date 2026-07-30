@@ -1,4 +1,4 @@
-name: Windows Web Desktop (noVNC + UltraVNC + bore)
+name: Windows RDP with bore (Tested)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: '120'
 
 jobs:
-  web-desktop:
+  rdp-tunnel:
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -17,128 +17,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare Windows (enable RDP for fallback, set password)
+      - name: Enable RDP and create user
         shell: powershell
         run: |
-          # Set runneradmin password for any desktop interaction
-          $password = "${{ secrets.RDP_PASSWORD }}"
-          net user runneradmin $password
-          # Enable RDP (optional, not used by noVNC)
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="Remote Desktop" new enable=yes
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-          Write-Host "Windows ready."
 
-      - name: Download and setup UltraVNC (portable)
-        shell: powershell
-        run: |
-          $uvncZip = "uvnc.zip"
-          $uvncUrl = "https://www.uvnc.eu/download/1420/uvnc_1420.zip"
-          Write-Host "Downloading UltraVNC..."
+          $username = "${{ secrets.RDP_USERNAME }}"
+          $password = "${{ secrets.RDP_PASSWORD }}"
+
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $username
+          }
+
           try {
-            Invoke-WebRequest -Uri $uvncUrl -OutFile $uvncZip -ErrorAction Stop
+            $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+            New-LocalUser -Name $username -Password $securePass -FullName "Remote Desktop User"
+            Add-LocalGroupMember -Group "Administrators" -Member $username
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+            Write-Host "User $username created and RDP enabled."
           } catch {
-            Write-Host "ERROR: Failed to download UltraVNC. $_"
+            Write-Host "ERROR: $_"
             exit 1
           }
-          Expand-Archive $uvncZip -DestinationPath ".\uvnc"
-          $uvncDir = Get-ChildItem -Directory -Path ".\uvnc" | Select-Object -First 1
-          if (-not $uvncDir) {
-            Write-Host "ERROR: Could not find extracted UltraVNC folder."
-            exit 1
+
+          # بررسی وضعیت سرویس RDP
+          $rdpService = Get-Service TermService -ErrorAction SilentlyContinue
+          if ($rdpService.Status -ne 'Running') {
+            Start-Service TermService
+            Write-Host "TermService started."
           }
-          # Move contents to a simpler path
-          Copy-Item -Path "$($uvncDir.FullName)\*" -Destination ".\vnc" -Recurse
-          Write-Host "UltraVNC extracted."
+          # مطمئن شویم RDP روی 0.0.0.0:3389 گوش می‌دهد
+          $netstat = netstat -an | Select-String ":3389"
+          Write-Host "RDP listening: $netstat"
 
-      - name: Configure and start UltraVNC server
-        shell: powershell
-        run: |
-          $vncPassword = "${{ secrets.RDP_PASSWORD }}"
-          # Set VNC password using setpasswd.exe (included)
-          $setpasswd = Get-ChildItem -Recurse -Path ".\vnc" -Filter "setpasswd.exe" | Select-Object -First 1
-          if ($setpasswd) {
-            & $setpasswd.FullName $vncPassword
-            Write-Host "VNC password set."
-          } else {
-            Write-Host "WARNING: setpasswd.exe not found, using insecure default password (may fail)."
-          }
-
-          # Start winvnc.exe in background
-          $winvnc = Get-ChildItem -Recurse -Path ".\vnc" -Filter "winvnc.exe" | Select-Object -First 1
-          if (-not $winvnc) {
-            Write-Host "ERROR: winvnc.exe not found."
-            exit 1
-          }
-          Start-Process -NoNewWindow -FilePath $winvnc.FullName -ArgumentList "-multi", "-run"
-          Start-Sleep -Seconds 5
-          Write-Host "UltraVNC server started on port 5900."
-
-      - name: Install websockify and Python dependencies
-        shell: powershell
-        run: |
-          python -m pip install --upgrade pip websockify
-          Write-Host "websockify installed."
-
-      - name: Start websockify (WebSocket proxy)
-        shell: powershell
-        run: |
-          Start-Process -NoNewWindow -FilePath "websockify" `
-            -ArgumentList "6080", "localhost:5900" `
-            -RedirectStandardOutput "ws.log" -RedirectStandardError "ws_err.log"
-          Write-Host "websockify started on 6080 -> localhost:5900."
-
-      - name: Download and prepare noVNC
-        shell: powershell
-        run: |
-          $novncZip = "novnc.zip"
-          $novncUrl = "https://github.com/novnc/noVNC/archive/refs/heads/master.zip"
-          Invoke-WebRequest -Uri $novncUrl -OutFile $novncZip
-          Expand-Archive $novncZip -DestinationPath ".\novnc-temp"
-          $novncDir = Get-ChildItem -Directory -Path ".\novnc-temp" | Select-Object -First 1
-          Copy-Item -Path "$($novncDir.FullName)\*" -Destination ".\novnc" -Recurse
-
-          # Create an auto-connect page
-          @"
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>Windows Desktop</title>
-              <style>
-                  body { margin: 0; background: #000; }
-                  #screen { width: 100vw; height: 100vh; }
-              </style>
-          </head>
-          <body>
-              <div id="screen"></div>
-              <script src="core/js/pojo.js"></script>
-              <script src="core/js/vnc.js"></script>
-              <script>
-                  var rfb = new RFB(document.getElementById('screen'), 'ws://' + location.hostname + ':6080');
-                  rfb.scaleViewport = true;
-                  rfb.resizeSession = true;
-              </script>
-          </body>
-          </html>
-          "@ | Out-File -FilePath ".\novnc\index.html" -Encoding utf8
-          Write-Host "noVNC prepared."
-
-      - name: Start Python HTTP server for noVNC
-        shell: powershell
-        run: |
-          Start-Process -NoNewWindow -FilePath "python" `
-            -ArgumentList "-m", "http.server", "8080", "--directory", "novnc" `
-            -RedirectStandardOutput "http.log" -RedirectStandardError "http_err.log"
-          Write-Host "HTTP server started on port 8080."
-
-      - name: Start bore tunnel for web access
+      - name: Start bore tunnel
         shell: powershell
         run: |
           $outLog = "bore_out.log"
           $errLog = "bore_err.log"
 
           Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-            -ArgumentList "local", "8080", "--to", "bore.pub" `
+            -ArgumentList "local", "3389", "--to", "bore.pub" `
             -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 
           Write-Host "Waiting for tunnel..."
@@ -174,25 +95,35 @@ jobs:
 
           Write-Host "Tunnel established on port $tunnelPort."
 
-      - name: Display access URL
+          # تست اتصال TCP از خود رانر به تونل
+          Write-Host "Testing tunnel connection..."
+          $testResult = Test-NetConnection -ComputerName bore.pub -Port $tunnelPort -InformationLevel Quiet -WarningAction SilentlyContinue
+          if (-not $testResult) {
+            Write-Host "WARNING: Tunnel test failed, but tunnel might still work."
+          } else {
+            Write-Host "Tunnel test SUCCESS - bore.pub:$tunnelPort is reachable."
+          }
+
+      - name: Display connection info
         shell: powershell
         run: |
           $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
           Write-Host ""
           Write-Host "======================================================"
-          Write-Host "  WINDOWS DESKTOP - OPEN IN ANDROID BROWSER"
+          Write-Host "  WINDOWS RDP READY FOR ANDROID"
           Write-Host "======================================================"
-          Write-Host "  URL: http://$($details.host):$($details.port)"
-          Write-Host "  Username: runneradmin"
+          Write-Host "  Host: $($details.host)"
+          Write-Host "  Port: $($details.port)"
+          Write-Host "  Username: ${{ secrets.RDP_USERNAME }}"
           Write-Host "  Password: (your secret)"
           Write-Host "======================================================"
           Write-Host ""
-          Write-Host "On your Android device, open Chrome and go to:"
-          Write-Host "  http://$($details.host):$($details.port)"
-          Write-Host "You will see the full Windows desktop."
+          Write-Host "In Microsoft Remote Desktop on Android:"
+          Write-Host "  PC Name: $($details.host):$($details.port)"
+          Write-Host "  User Name: ${{ secrets.RDP_USERNAME }}"
           Write-Host ""
 
-      - name: Keep session alive
+      - name: Keep session alive (with health checks)
         shell: powershell
         run: |
           $duration = [int]${{ github.event.inputs.session_minutes }}
@@ -203,18 +134,20 @@ jobs:
             $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
+            # هر ۵ دقیقه سلامت تونل و RDP را بررسی کن
             if ((Get-Date).Minute % 5 -eq 0) {
+              # بررسی اجرای bore
               $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
               if (-not $boreProc) {
-                Write-Host "bore lost. Restarting..."
+                Write-Host "Tunnel lost. Restarting..."
                 Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-                  -ArgumentList "local", "8080", "--to", "bore.pub"
+                  -ArgumentList "local", "3389", "--to", "bore.pub"
               }
-              $vncProc = Get-Process -Name "winvnc" -ErrorAction SilentlyContinue
-              if (-not $vncProc) {
-                Write-Host "winvnc lost. Restarting..."
-                $winvnc = Get-ChildItem -Recurse -Path ".\vnc" -Filter "winvnc.exe" | Select-Object -First 1
-                if ($winvnc) { Start-Process -NoNewWindow -FilePath $winvnc.FullName -ArgumentList "-multi", "-run" }
+              # بررسی سرویس RDP
+              $rdp = Get-Service TermService -ErrorAction SilentlyContinue
+              if ($rdp.Status -ne 'Running') {
+                Write-Host "RDP service stopped. Restarting..."
+                Start-Service TermService
               }
             }
             Start-Sleep -Seconds 60

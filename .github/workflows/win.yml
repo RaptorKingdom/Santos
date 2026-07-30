@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       session_minutes:
-        description: 'مدت زمان فعال بودن (دقیقه)'
+        description: 'Duration in minutes'
         required: true
         default: '120'
 
@@ -14,10 +14,9 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: فعال‌سازی RDP و ایجاد کاربر
+      - name: Enable RDP and create user
         shell: powershell
         run: |
-          # فعال‌سازی RDP بدون NLA
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="Remote Desktop" new enable=yes
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
@@ -25,62 +24,56 @@ jobs:
           $username = "${{ secrets.RDP_USERNAME }}"
           $password = "${{ secrets.RDP_PASSWORD }}"
 
-          # حذف کاربر قدیمی در صورت وجود
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name $username
           }
 
-          # ساخت کاربر جدید
           try {
             $securePass = ConvertTo-SecureString $password -AsPlainText -Force
             New-LocalUser -Name $username -Password $securePass -FullName "Remote Desktop User"
             Add-LocalGroupMember -Group "Administrators" -Member $username
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-            Write-Host "✅ کاربر $username ساخته و RDP فعال شد."
+            Write-Host "User $username created and RDP enabled."
           } catch {
-            Write-Host "❌ خطا: $_"
+            Write-Host "ERROR: $_"
             exit 1
           }
 
-      - name: دانلود و راه‌اندازی bore
+      - name: Download and start bore tunnel
         shell: powershell
         run: |
-          # لینک مستقیم آخرین نسخه bore (نسخه 0.5.0 پایدار)
           $boreUrl = "https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-x86_64-pc-windows-msvc.exe"
           Invoke-WebRequest -Uri $boreUrl -OutFile "bore.exe"
           if (-not (Test-Path "bore.exe")) {
-            Write-Host "❌ دانلود bore ناموفق بود."
+            Write-Host "ERROR: bore download failed."
             exit 1
           }
-          Write-Host "✅ bore دانلود شد."
+          Write-Host "bore downloaded."
 
-          # اجرای تونل TCP
           $outLog = "bore_out.log"
           $errLog = "bore_err.log"
           Start-Process -NoNewWindow -FilePath ".\bore.exe" `
             -ArgumentList "local", "3389", "--to", "bore.pub" `
             -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 
-          Write-Host "⏳ منتظر دریافت آدرس تونل..."
+          Write-Host "Waiting for tunnel..."
           Start-Sleep -Seconds 8
 
-          $tunnelHost = "bore.pub"
           $tunnelPort = $null
           for ($i=1; $i -le 10; $i++) {
             if (Test-Path $outLog) {
               $content = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-              # bore خروجی می‌ده: "listening on bore.pub:12345"
               if ($content -match 'listening on\s+[\w\.]+:(\d+)') {
                 $tunnelPort = $matches[1]
                 break
               }
             }
-            Write-Host "تلاش $i/10..."
+            Write-Host "Attempt $i/10..."
             Start-Sleep -Seconds 5
           }
 
           if (-not $tunnelPort) {
-            Write-Host "❌ دریافت پورت ناموفق بود."
+            Write-Host "ERROR: Could not extract port."
             Write-Host "=== stdout ==="
             if (Test-Path $outLog) { Get-Content $outLog }
             Write-Host "=== stderr ==="
@@ -88,52 +81,51 @@ jobs:
             exit 1
           }
 
-          # ذخیره اطلاعات اتصال
           @"
-          host=$tunnelHost
+          host=bore.pub
           port=$tunnelPort
           "@ | Out-File -FilePath connection.txt -Encoding utf8
 
-          Write-Host "✅ تونل برقرار شد."
+          Write-Host "Tunnel established."
 
-      - name: نمایش اطلاعات اتصال
+      - name: Display connection info
         shell: powershell
         run: |
           $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
           Write-Host ""
-          Write-Host "╔════════════════════════════════════════════════╗"
-          Write-Host "║     🖥️  WINDOWS RDP آماده اتصال              ║"
-          Write-Host "╠════════════════════════════════════════════════╣"
-          Write-Host "║  🌐 آدرس: $($details.host):$($details.port)"
-          Write-Host "║  👤 کاربر: ${{ secrets.RDP_USERNAME }}"
-          Write-Host "║  🔑 رمز عبور: (مخفی)"
-          Write-Host "╚════════════════════════════════════════════════╝"
+          Write-Host "======================================================"
+          Write-Host "  WINDOWS RDP READY FOR ANDROID"
+          Write-Host "======================================================"
+          Write-Host "  Host: $($details.host)"
+          Write-Host "  Port: $($details.port)"
+          Write-Host "  Username: ${{ secrets.RDP_USERNAME }}"
+          Write-Host "  Password: (your secret)"
+          Write-Host "======================================================"
           Write-Host ""
-          Write-Host "📱 تنظیمات در Microsoft Remote Desktop اندروید:"
-          Write-Host "   PC Name: $($details.host):$($details.port)"
-          Write-Host "   User Name: ${{ secrets.RDP_USERNAME }}"
-          Write-Host "   Password: همان که در Secret تنظیم کردید"
+          Write-Host "In Microsoft Remote Desktop on Android:"
+          Write-Host "  PC Name: $($details.host):$($details.port)"
+          Write-Host "  User Name: ${{ secrets.RDP_USERNAME }}"
           Write-Host ""
 
-      - name: زنده نگه‌داشتن Session
+      - name: Keep session alive
         shell: powershell
         run: |
           $duration = [int]${{ github.event.inputs.session_minutes }}
           $endTime = (Get-Date).AddMinutes($duration)
 
-          Write-Host "🟢 جلسه به مدت $duration دقیقه فعال خواهد ماند."
+          Write-Host "Session will stay active for $duration minutes."
           while ((Get-Date) -lt $endTime) {
             $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")
-            Write-Host "⏳ $remaining مانده | $(Get-Date -Format 'HH:mm:ss')"
+            Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
             if ((Get-Date).Minute % 5 -eq 0) {
               $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
               if (-not $boreProc) {
-                Write-Host "⚠️ تونل قطع شد. راه‌اندازی مجدد..."
+                Write-Host "Tunnel lost. Restarting..."
                 Start-Process -NoNewWindow -FilePath ".\bore.exe" `
                   -ArgumentList "local", "3389", "--to", "bore.pub"
               }
             }
             Start-Sleep -Seconds 60
           }
-          Write-Host "⏰ زمان جلسه به پایان رسید."
+          Write-Host "Time is up."

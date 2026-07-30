@@ -1,4 +1,4 @@
-name: Windows RDP via localhost.run (No Signup)
+name: Windows RDP via localhost.run (Fixed)
 
 on:
   workflow_dispatch:
@@ -42,37 +42,39 @@ jobs:
       - name: Start SSH reverse tunnel via localhost.run
         shell: powershell
         run: |
-          # ایجاد فایل temporarily برای ذخیره خروجی
-          $sshLog = "ssh.log"
-          
-          # اجرای SSH در بکگراند
+          $sshLog = "ssh_stdout.log"
+          $sshErr = "ssh_stderr.log"
+
+          # اجرای SSH در بک‌گراند با فایل‌های جداگانه
           Start-Process -NoNewWindow -FilePath "ssh" `
             -ArgumentList "-o", "StrictHostKeyChecking=no", "-R", "0:localhost:3389", "nokey@localhost.run" `
-            -RedirectStandardOutput $sshLog -RedirectStandardError $sshLog
+            -RedirectStandardOutput $sshLog -RedirectStandardError $sshErr
 
           Write-Host "Waiting for tunnel to establish..."
           Start-Sleep -Seconds 10
 
-          # استخراج IP و پورت از خروجی
-          $tunnelInfo = $null
+          $tunnelHost = $null
+          $tunnelPort = $null
           for ($i=1; $i -le 10; $i++) {
             if (Test-Path $sshLog) {
-              $content = Get-Content $sshLog -Raw
-              # الگوی خروجی: "Connect to 1.2.3.4 port 54321"
+              $content = Get-Content $sshLog -Raw -ErrorAction SilentlyContinue
               if ($content -match 'Connect to\s+([\d\.]+)\s+port\s+(\d+)') {
                 $tunnelHost = $matches[1]
                 $tunnelPort = $matches[2]
-                $tunnelInfo = "$tunnelHost`:$tunnelPort"
                 break
               }
             }
+            # همچنین stderr را برای دیباگ بررسی کن
             Write-Host "Attempt $i/10..."
             Start-Sleep -Seconds 5
           }
 
-          if (-not $tunnelInfo) {
+          if (-not $tunnelHost) {
             Write-Host "ERROR: Could not get tunnel info."
+            Write-Host "=== STDOUT ==="
             if (Test-Path $sshLog) { Get-Content $sshLog }
+            Write-Host "=== STDERR ==="
+            if (Test-Path $sshErr) { Get-Content $sshErr }
             exit 1
           }
 
@@ -113,7 +115,6 @@ jobs:
             $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
 
-            # اگر SSH قطع شد، مجدداً اجرا شود
             if ((Get-Date).Minute % 5 -eq 0) {
               $sshProc = Get-Process -Name "ssh" -ErrorAction SilentlyContinue
               if (-not $sshProc) {

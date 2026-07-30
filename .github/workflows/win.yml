@@ -1,4 +1,4 @@
-name: Windows RDP for Android (Fixed)
+name: Windows RDP for Android (Stable)
 
 on:
   workflow_dispatch:
@@ -15,22 +15,34 @@ jobs:
 
     steps:
       - name: Enable RDP and create user
-        shell: cmd
+        shell: powershell
         run: |
-          :: Enable RDP
+          # Enable RDP
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
           netsh advfirewall firewall set rule group="Remote Desktop" new enable=yes
           reg add "HKLM\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
 
-          :: Create user with password from secrets
-          net user %RDP_USERNAME% %RDP_PASSWORD% /add /fullname:"Remote Desktop User"
-          net localgroup Administrators %RDP_USERNAME% /add
-          net localgroup "Remote Desktop Users" %RDP_USERNAME% /add
+          # Create user from Secrets
+          $username = "${{ secrets.RDP_USERNAME }}"
+          $password = "${{ secrets.RDP_PASSWORD }}"
 
-          echo User %RDP_USERNAME% created and RDP enabled.
-        env:
-          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          # Check if user exists and remove
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $username
+          }
+
+          # Create user
+          try {
+            $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+            New-LocalUser -Name $username -Password $securePass -FullName "Remote Desktop User" -ErrorAction Stop
+            Add-LocalGroupMember -Group "Administrators" -Member $username
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+            Write-Host "User $username created and RDP enabled."
+          } catch {
+            Write-Host "ERROR: Failed to create user. $_"
+            Write-Host "Check that the password does NOT contain the username and meets complexity requirements."
+            exit 1
+          }
 
       - name: Download cloudflared
         shell: powershell

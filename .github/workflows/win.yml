@@ -1,0 +1,132 @@
+name: Windows RDP Access (Direct Tunnel for Android)
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: 'مدت زمان فعال بودن (دقیقه)'
+        required: true
+        default: '120'
+
+jobs:
+  rdp-tunnel:
+    runs-on: windows-latest
+    timeout-minutes: 360  # حداکثر ۶ ساعت
+
+    steps:
+      - name: ایجاد کاربر و فعال‌سازی RDP
+        shell: powershell
+        run: |
+          # فعال‌سازی RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # اجازه اتصال بدون Network Level Authentication (اختیاری، برای سهولت)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          
+          # ساخت کاربر از روی Secrets
+          $username = "${{ secrets.RDP_USERNAME }}"
+          $password = ConvertTo-SecureString "${{ secrets.RDP_PASSWORD }}" -AsPlainText -Force
+          
+          # حذف کاربر اگر قبلاً وجود داشته (برای جلوگیری از خطا در اجرای مجدد)
+          Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
+          
+          New-LocalUser -Name $username -Password $password -FullName "Remote Desktop User"
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          
+          Write-Host "✅ کاربر $username ساخته و RDP فعال شد."
+
+      - name: دانلود cloudflared
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+          Write-Host "✅ cloudflared دانلود شد."
+
+      - name: راه‌اندازی تونل RDP
+        shell: powershell
+        run: |
+          # اجرای تونل TCP
+          Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" `
+            -ArgumentList "tunnel", "--url", "tcp://localhost:3389", "--no-autoupdate" `
+            -RedirectStandardOutput "tunnel.log" -RedirectStandardError "tunnel_error.log"
+          
+          Write-Host "⏳ در حال دریافت آدرس تونل..."
+          Start-Sleep -Seconds 15
+          
+          # تلاش برای استخراج host و port از لاگ
+          $maxAttempts = 6
+          $tcpUrl = $null
+          for ($i=1; $i -le $maxAttempts; $i++) {
+              $logContent = Get-Content tunnel.log -Raw -ErrorAction SilentlyContinue
+              if ($logContent -match 'tcp://([^:]+):(\d+)') {
+                  $tcpHost = $matches[1]
+                  $tcpPort = $matches[2]
+                  $tcpUrl = "tcp://${tcpHost}:${tcpPort}"
+                  break
+              }
+              Write-Host "تلاش $i از $maxAttempts..."
+              Start-Sleep -Seconds 5
+          }
+          
+          if (-not $tcpUrl) {
+              Write-Host "❌ دریافت آدرس تونل ناموفق بود. محتوای لاگ:"
+              Get-Content tunnel.log
+              Get-Content tunnel_error.log
+              exit 1
+          }
+          
+          # ذخیره آدرس برای نمایش نهایی
+          @"
+          host: $tcpHost
+          port: $tcpPort
+          username: ${{ secrets.RDP_USERNAME }}
+          "@ | Out-File -FilePath connection_details.txt -Encoding utf8
+          
+          Write-Host "✅ تونل فعال شد."
+
+      - name: نمایش اطلاعات اتصال
+        shell: powershell
+        run: |
+          $details = Get-Content connection_details.txt -Raw | ConvertFrom-StringData
+          Write-Host ""
+          Write-Host "╔══════════════════════════════════════════════════════╗"
+          Write-Host "║         🖥️  WINDOWS RDP READY FOR ANDROID             ║"
+          Write-Host "╠══════════════════════════════════════════════════════╣"
+          Write-Host "║  🌐 Host: $($details.host)"
+          Write-Host "║  🔌 Port: $($details.port)"
+          Write-Host "║  👤 Username: $($details.username)"
+          Write-Host "║  🔑 Password: (از Secret خود استفاده کنید)            "
+          Write-Host "╚══════════════════════════════════════════════════════╝"
+          Write-Host ""
+          Write-Host "📱 در Microsoft Remote Desktop اندروید:"
+          Write-Host "   PC Name: $($details.host)`:$($details.port)"
+          Write-Host "   User Name: $($details.username)"
+          Write-Host "   Password: همان که در Secret تنظیم کردید"
+          Write-Host ""
+
+      - name: زنده نگه‌داشتن Session
+        shell: powershell
+        run: |
+          $durationMinutes = [int]${{ github.event.inputs.session_minutes }}
+          $endTime = (Get-Date).AddMinutes($durationMinutes)
+          
+          Write-Host "🟢 Session تا $([datetime]::Now.AddMinutes($durationMinutes).ToString('HH:mm:ss')) فعال می‌ماند."
+          
+          while ((Get-Date) -lt $endTime) {
+              $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")
+              Write-Host "⏳ $remaining باقی‌مانده | $(Get-Date -Format 'HH:mm:ss')"
+              
+              # بررسی سلامت تونل
+              if ((Get-Date).Minute % 5 -eq 0) {
+                  $cfProc = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+                  if (-not $cfProc) {
+                      Write-Host "⚠️ تونل قطع شد. راه‌اندازی مجدد..."
+                      Start-Process -NoNewWindow -FilePath ".\cloudflared.exe" `
+                        -ArgumentList "tunnel", "--url", "tcp://localhost:3389", "--no-autoupdate"
+                  }
+              }
+              Start-Sleep -Seconds 60
+          }
+          
+          Write-Host "⏰ زمان جلسه به پایان رسید."

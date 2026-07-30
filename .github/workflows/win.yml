@@ -1,4 +1,4 @@
-name: Windows RDP via ngrok (Corrected)
+name: Windows RDP via ngrok (Fixed Path)
 
 on:
   workflow_dispatch:
@@ -44,23 +44,23 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
           Expand-Archive ngrok.zip -DestinationPath .
-          # لیست فایل‌ها برای بررسی
-          Get-ChildItem -Recurse -Name
+          # فقط برای بررسی
+          Get-ChildItem -Recurse -Filter "ngrok.exe" | Select-Object FullName
           Write-Host "ngrok downloaded."
 
       - name: Start ngrok TCP tunnel for RDP
         shell: powershell
         run: |
-          # مسیر دقیق ngrok.exe
-          $ngrokPath = Get-ChildItem -Recurse -Name "ngrok.exe" | Select-Object -First 1
-          if (-not $ngrokPath) {
+          # پیدا کردن مسیر کامل ngrok.exe
+          $ngrokExe = Get-ChildItem -Recurse -Filter "ngrok.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ngrokExe) {
             Write-Host "ERROR: ngrok.exe not found!"
             Get-ChildItem -Recurse
             exit 1
           }
-          Write-Host "Found ngrok at: $ngrokPath"
+          Write-Host "Found ngrok at: $ngrokExe"
 
-          Start-Process -NoNewWindow -FilePath $ngrokPath `
+          Start-Process -NoNewWindow -FilePath $ngrokExe `
             -ArgumentList "tcp", "3389", "--log=stdout" `
             -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok_err.log"
 
@@ -128,9 +128,9 @@ jobs:
               $ng = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
               if (-not $ng) {
                 Write-Host "ngrok lost. Restarting..."
-                $ngrokPath = Get-ChildItem -Recurse -Name "ngrok.exe" | Select-Object -First 1
-                if ($ngrokPath) {
-                  Start-Process -NoNewWindow -FilePath $ngrokPath `
+                $ngrokExe = Get-ChildItem -Recurse -Filter "ngrok.exe" | Select-Object -First 1 -ExpandProperty FullName
+                if ($ngrokExe) {
+                  Start-Process -NoNewWindow -FilePath $ngrokExe `
                     -ArgumentList "tcp", "3389", "--log=stdout"
                 }
               }

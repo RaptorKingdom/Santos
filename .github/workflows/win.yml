@@ -48,7 +48,6 @@ jobs:
           $outLog = "bore_out.log"
           $errLog = "bore_err.log"
 
-          # اجرای bore از ریشه مخزن
           Start-Process -NoNewWindow -FilePath ".\bore.exe" `
             -ArgumentList "local", "3389", "--to", "bore.pub" `
             -RedirectStandardOutput $outLog -RedirectStandardError $errLog
@@ -59,8 +58,11 @@ jobs:
           $tunnelPort = $null
           for ($i=1; $i -le 10; $i++) {
             if (Test-Path $outLog) {
-              $content = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-              if ($content -match 'listening on\s+[\w\.]+:(\d+)') {
+              # Read output and remove ANSI color codes
+              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+              $clean = $raw -replace '\x1b\[[0-9;]*m', ''
+              # bore prints: "listening at bore.pub:PORT"
+              if ($clean -match 'listening at [\w\.]+:(\d+)') {
                 $tunnelPort = $matches[1]
                 break
               }
@@ -83,7 +85,7 @@ jobs:
           port=$tunnelPort
           "@ | Out-File -FilePath connection.txt -Encoding utf8
 
-          Write-Host "Tunnel established."
+          Write-Host "Tunnel established on port $tunnelPort."
 
       - name: Display connection info
         shell: powershell

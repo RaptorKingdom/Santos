@@ -1,4 +1,4 @@
-name: Windows RDP with bore (Stable)
+name: Windows RDP with bore (Auto-Update README)
 
 on:
   workflow_dispatch:
@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable RDP and create user
         shell: powershell
@@ -42,41 +44,54 @@ jobs:
             exit 1
           }
 
-          # Ensure TermService is running
           Get-Service TermService | Start-Service
 
-      - name: Start bore tunnel with keep-alive
+      - name: Start bore tunnel
         shell: powershell
         run: |
           $outLog = "bore_out.log"
           $errLog = "bore_err.log"
 
-          # Function to start bore and extract port
-          function Start-BoreTunnel {
-            Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-              -ArgumentList "local", "3389", "--to", "bore.pub" `
-              -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-            Start-Sleep -Seconds 8
-            $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-            $clean = $raw -replace '\x1b\[[0-9;]*m', ''
-            if ($clean -match 'listening at [\w\.]+:(\d+)') {
-              return $matches[1]
+          Start-Process -NoNewWindow -FilePath ".\bore.exe" `
+            -ArgumentList "local", "3389", "--to", "bore.pub" `
+            -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+
+          Write-Host "Waiting for tunnel..."
+          Start-Sleep -Seconds 8
+
+          $tunnelPort = $null
+          for ($i=1; $i -le 10; $i++) {
+            if (Test-Path $outLog) {
+              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+              $clean = $raw -replace '\x1b\[[0-9;]*m', ''
+              if ($clean -match 'listening at [\w\.]+:(\d+)') {
+                $tunnelPort = $matches[1]
+                break
+              }
             }
-            return $null
+            Write-Host "Attempt $i/10..."
+            Start-Sleep -Seconds 5
           }
 
-          $port = Start-BoreTunnel
-          if (-not $port) {
-            Write-Host "ERROR: Could not start bore."
+          if (-not $tunnelPort) {
+            Write-Host "ERROR: Could not extract port."
+            Write-Host "=== stdout ==="
+            if (Test-Path $outLog) { Get-Content $outLog }
+            Write-Host "=== stderr ==="
+            if (Test-Path $errLog) { Get-Content $errLog }
             exit 1
           }
 
-          "host=bore.pub`nport=$port" | Out-File -FilePath connection.txt -Encoding utf8
-          Write-Host "Tunnel established on port $port."
+          $tunnelHost = "bore.pub"
+          @"
+          host=$tunnelHost
+          port=$tunnelPort
+          "@ | Out-File -FilePath connection.txt -Encoding utf8
 
-          # Start keep-alive job (send TCP probe every 30 seconds)
+          Write-Host "Tunnel established on port $tunnelPort."
+
+          # Keep-alive job
           $keepAliveScript = {
-            param($port)
             while ($true) {
               try {
                 $tcp = New-Object Net.Sockets.TcpClient
@@ -86,23 +101,78 @@ jobs:
               Start-Sleep -Seconds 30
             }
           }
-          Start-Job -ScriptBlock $keepAliveScript -ArgumentList $port | Out-Null
+          Start-Job -ScriptBlock $keepAliveScript | Out-Null
 
-          # Monitor bore process and restart if needed, update port
+          # Monitoring loop (restarts bore if needed)
           while ($true) {
             Start-Sleep -Seconds 30
             $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
             if (-not $boreProc) {
               Write-Host "Bore stopped. Restarting..."
-              $port = Start-BoreTunnel
-              if ($port) {
-                "host=bore.pub`nport=$port" | Out-File -FilePath connection.txt -Encoding utf8
-                Write-Host "Tunnel re-established on port $port."
+              Start-Process -NoNewWindow -FilePath ".\bore.exe" `
+                -ArgumentList "local", "3389", "--to", "bore.pub" `
+                -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+              Start-Sleep -Seconds 8
+              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+              $clean = $raw -replace '\x1b\[[0-9;]*m', ''
+              if ($clean -match 'listening at [\w\.]+:(\d+)') {
+                $tunnelPort = $matches[1]
+                @"
+                host=$tunnelHost
+                port=$tunnelPort
+                "@ | Out-File -FilePath connection.txt -Encoding utf8
+                Write-Host "Tunnel re-established on port $tunnelPort."
               }
             }
           }
 
-      - name: Display connection info (initial)
+      - name: Update README.md with connection info
+        shell: powershell
+        run: |
+          $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
+          $connectionString = "$($details.host):$($details.port)"
+
+          # اگر README.md وجود ندارد، بساز
+          if (-not (Test-Path "README.md")) {
+            New-Item -Path "README.md" -ItemType File
+          }
+
+          # خواندن محتوای فعلی
+          $readmeContent = Get-Content "README.md" -Raw -ErrorAction SilentlyContinue
+
+          # متن جدیدی که می‌خواهیم اضافه یا جایگزین کنیم
+          $newSection = @"
+          ## Windows RDP Access
+          **Connection Address:** `$connectionString`
+          **Username:** `${{ secrets.RDP_USERNAME }}`
+          **Password:** (stored in GitHub Secrets)
+          **Expires:** $(Get-Date).AddMinutes(${{ github.event.inputs.session_minutes }}).ToString('yyyy-MM-dd HH:mm:ss') UTC
+          "@
+
+          # اگر بخش قبلی وجود داشت، آن را جایگزین کن
+          if ($readmeContent -match '## Windows RDP Access') {
+            $readmeContent = $readmeContent -replace '(?s)## Windows RDP Access.*', $newSection
+          } else {
+            # در غیر این صورت به انتهای فایل اضافه کن
+            $readmeContent += "`r`n$newSection"
+          }
+
+          # نوشتن در فایل
+          $readmeContent | Out-File -FilePath "README.md" -Encoding utf8
+          Write-Host "README.md updated with connection info."
+
+      - name: Commit and push README.md
+        shell: powershell
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "Update RDP access info [skip ci]" --allow-empty
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Display connection info
         shell: powershell
         run: |
           $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
@@ -119,14 +189,15 @@ jobs:
           Write-Host "In Microsoft Remote Desktop on Android:"
           Write-Host "  PC Name: $($details.host):$($details.port)"
           Write-Host "  User Name: ${{ secrets.RDP_USERNAME }}"
-          Write-Host "  (Check logs if port changes later)"
           Write-Host ""
+          Write-Host "This info is also in README.md at the root of the repo."
 
-      - name: Keep session alive (fallback)
+      - name: Keep session alive
         shell: powershell
         run: |
           $duration = [int]${{ github.event.inputs.session_minutes }}
           $endTime = (Get-Date).AddMinutes($duration)
+
           Write-Host "Session will stay active for $duration minutes."
           while ((Get-Date) -lt $endTime) {
             $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")

@@ -1,4 +1,3 @@
-﻿hi
 ## Windows RDP Access
 **Connection Address:** `bore.pub:46958`  
 **Username:** `Raptor`  

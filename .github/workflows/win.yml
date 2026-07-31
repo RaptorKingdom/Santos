@@ -46,110 +46,111 @@ jobs:
 
           Get-Service TermService | Start-Service
 
-      - name: Start bore tunnel (background job)
+      - name: Create bore runner script
         shell: powershell
         run: |
-          # Background job that starts bore and keeps it alive
-          $boreJob = Start-Job -Name "BoreTunnel" -ScriptBlock {
-            $outLog = "bore_out.log"
-            $errLog = "bore_err.log"
-            $tunnelHost = "bore.pub"
+          # ساخت فایل bore_runner.ps1 بدون استفاده از here-string
+          $lines = @(
+            '$outLog = "bore_out.log"',
+            '$errLog = "bore_err.log"',
+            '$tunnelHost = "bore.pub"',
+            '',
+            'function Start-Bore {',
+            '  Start-Process -NoNewWindow -FilePath ".\bore.exe" -ArgumentList "local","3389","--to","bore.pub" -RedirectStandardOutput $outLog -RedirectStandardError $errLog',
+            '  Start-Sleep -Seconds 8',
+            '  $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue',
+            '  $clean = $raw -replace "\x1b\[[0-9;]*m", ""',
+            '  if ($clean -match "listening at [\w\.]+:(\d+)") {',
+            '    $port = $matches[1]',
+            '    $connectionInfo = "host=$tunnelHost`nport=$port"',
+            '    $connectionInfo | Out-File -FilePath connection.txt -Encoding utf8',
+            '    Write-Host "Tunnel established on port $port"',
+            '    return $port',
+            '  }',
+            '  return $null',
+            '}',
+            '',
+            '# Keep-alive probe every 30s',
+            'Start-Job -ScriptBlock {',
+            '  while ($true) {',
+            '    try { $tcp = New-Object Net.Sockets.TcpClient; $tcp.Connect("127.0.0.1", 3389); $tcp.Close() } catch { }',
+            '    Start-Sleep -Seconds 30',
+            '  }',
+            '} | Out-Null',
+            '',
+            '# Start bore for the first time',
+            '$currentPort = Start-Bore',
+            'if (-not $currentPort) {',
+            '  Write-Host "ERROR: Could not start bore."',
+            '  exit 1',
+            '}',
+            '',
+            '# Monitor loop',
+            'while ($true) {',
+            '  Start-Sleep -Seconds 30',
+            '  $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue',
+            '  if (-not $boreProc) {',
+            '    Write-Host "Bore stopped. Restarting..."',
+            '    $currentPort = Start-Bore',
+            '  }',
+            '}'
+          )
+          $lines | Out-File -FilePath bore_runner.ps1 -Encoding utf8
+          Write-Host "bore_runner.ps1 created."
 
-            function Start-Bore {
-              Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-                -ArgumentList "local", "3389", "--to", "bore.pub" `
-                -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-              Start-Sleep -Seconds 8
-              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-              $clean = $raw -replace '\x1b\[[0-9;]*m', ''
-              if ($clean -match 'listening at [\w\.]+:(\d+)') {
-                $port = $matches[1]
-                $connectionInfo = "host=$tunnelHost`nport=$port"
-                $connectionInfo | Out-File -FilePath connection.txt -Encoding utf8
-                Write-Host "Tunnel established on port $port"
-                return $port
-              }
-              return $null
-            }
+      - name: Start bore tunnel (detached)
+        shell: powershell
+        run: |
+          # اجرا به عنوان یک فرآیند جداگانه که بعد از پایان این مرحله هم زنده بماند
+          Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "bore_runner.ps1" -WindowStyle Hidden
+          Write-Host "Bore runner started in background."
 
-            # Keep-alive: probe RDP every 30s
-            $keepAlive = {
-              while ($true) {
-                try {
-                  $tcp = New-Object Net.Sockets.TcpClient
-                  $tcp.Connect("127.0.0.1", 3389)
-                  $tcp.Close()
-                } catch { }
-                Start-Sleep -Seconds 30
-              }
-            }
-            Start-Job -ScriptBlock $keepAlive | Out-Null
-
-            # Start bore the first time
-            $currentPort = Start-Bore
-            if (-not $currentPort) {
-              Write-Host "ERROR: Could not start bore."
-              exit 1
-            }
-
-            # Monitor bore process and restart if it dies
-            while ($true) {
-              Start-Sleep -Seconds 30
-              $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-              if (-not $boreProc) {
-                Write-Host "Bore stopped. Restarting..."
-                $currentPort = Start-Bore
-              }
-            }
-          }
-
-          # Wait until connection.txt is created (max 30 seconds)
+          # صبر می‌کنیم تا فایل connection.txt ساخته شود
           Write-Host "Waiting for tunnel to be ready..."
-          $wait = 0
-          while (-not (Test-Path "connection.txt") -and $wait -lt 30) {
-            Start-Sleep -Seconds 2
-            $wait += 2
+          for ($i=0; $i -lt 30; $i++) {
+            if (Test-Path "connection.txt") { break }
+            Start-Sleep -Seconds 1
           }
-
           if (Test-Path "connection.txt") {
             Write-Host "Tunnel is ready."
           } else {
-            Write-Host "WARNING: connection.txt not found after 30s. Tunnel may have failed."
+            Write-Host "WARNING: Tunnel may not have started. Will try to continue."
           }
 
-      - name: Update README.md with connection info
+      - name: Update README.md
         shell: powershell
         run: |
           if (-not (Test-Path "connection.txt")) {
-            Write-Host "ERROR: connection.txt not found. Tunnel might have failed."
+            Write-Host "ERROR: connection.txt not found."
             exit 1
           }
 
           $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
           $connectionString = "$($details.host):$($details.port)"
 
+          $username = "${{ secrets.RDP_USERNAME }}"
+          $expiry = (Get-Date).AddMinutes(${{ github.event.inputs.session_minutes }}).ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+
+          # ساخت محتوای جدید README بدون here-string
+          $newSection = "## Windows RDP Access`r`n"
+          $newSection += "**Connection Address:** ``$connectionString``  `r`n"
+          $newSection += "**Username:** ``$username``  `r`n"
+          $newSection += "**Password:** (stored in GitHub Secrets)  `r`n"
+          $newSection += "**Expires:** $expiry  `r`n"
+
           if (-not (Test-Path "README.md")) {
-            New-Item -Path "README.md" -ItemType File
-          }
-
-          $readmeContent = Get-Content "README.md" -Raw -ErrorAction SilentlyContinue
-
-          $newSection = @"
-## Windows RDP Access
-**Connection Address:** `$connectionString`
-**Username:** `${{ secrets.RDP_USERNAME }}`
-**Password:** (stored in GitHub Secrets)
-**Expires:** $(Get-Date).AddMinutes(${{ github.event.inputs.session_minutes }}).ToString('yyyy-MM-dd HH:mm:ss') UTC
-"@
-
-          if ($readmeContent -match '## Windows RDP Access') {
-            $readmeContent = $readmeContent -replace '(?s)## Windows RDP Access.*', $newSection
+            $readmeContent = $newSection
           } else {
-            $readmeContent += "`r`n$newSection"
+            $readmeContent = Get-Content "README.md" -Raw -ErrorAction SilentlyContinue
+            if ($readmeContent -match '## Windows RDP Access') {
+              $readmeContent = $readmeContent -replace '(?s)## Windows RDP Access.*', $newSection
+            } else {
+              $readmeContent += "`r`n$newSection"
+            }
           }
 
           $readmeContent | Out-File -FilePath "README.md" -Encoding utf8
-          Write-Host "README.md updated with connection info."
+          Write-Host "README.md updated."
 
       - name: Commit and push README.md
         shell: powershell

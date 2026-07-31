@@ -49,72 +49,72 @@ jobs:
       - name: Start bore tunnel (background job)
         shell: powershell
         run: |
-          # Create a script that will run bore and keep it alive
-          $boreScript = @'
-          $outLog = "bore_out.log"
-          $errLog = "bore_err.log"
-          $tunnelHost = "bore.pub"
+          # Background job that starts bore and keeps it alive
+          $boreJob = Start-Job -Name "BoreTunnel" -ScriptBlock {
+            $outLog = "bore_out.log"
+            $errLog = "bore_err.log"
+            $tunnelHost = "bore.pub"
 
-          function Start-Bore {
-            Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-              -ArgumentList "local", "3389", "--to", "bore.pub" `
-              -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-            Start-Sleep -Seconds 8
-            $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-            $clean = $raw -replace '\x1b\[[0-9;]*m', ''
-            if ($clean -match 'listening at [\w\.]+:(\d+)') {
-              $port = $matches[1]
-              $connectionInfo = "host=$tunnelHost`nport=$port"
-              $connectionInfo | Out-File -FilePath connection.txt -Encoding utf8
-              Write-Host "Tunnel established on port $port"
-              return $port
+            function Start-Bore {
+              Start-Process -NoNewWindow -FilePath ".\bore.exe" `
+                -ArgumentList "local", "3389", "--to", "bore.pub" `
+                -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+              Start-Sleep -Seconds 8
+              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+              $clean = $raw -replace '\x1b\[[0-9;]*m', ''
+              if ($clean -match 'listening at [\w\.]+:(\d+)') {
+                $port = $matches[1]
+                $connectionInfo = "host=$tunnelHost`nport=$port"
+                $connectionInfo | Out-File -FilePath connection.txt -Encoding utf8
+                Write-Host "Tunnel established on port $port"
+                return $port
+              }
+              return $null
             }
-            return $null
-          }
 
-          # Start keep-alive job
-          $keepAlive = {
+            # Keep-alive: probe RDP every 30s
+            $keepAlive = {
+              while ($true) {
+                try {
+                  $tcp = New-Object Net.Sockets.TcpClient
+                  $tcp.Connect("127.0.0.1", 3389)
+                  $tcp.Close()
+                } catch { }
+                Start-Sleep -Seconds 30
+              }
+            }
+            Start-Job -ScriptBlock $keepAlive | Out-Null
+
+            # Start bore the first time
+            $currentPort = Start-Bore
+            if (-not $currentPort) {
+              Write-Host "ERROR: Could not start bore."
+              exit 1
+            }
+
+            # Monitor bore process and restart if it dies
             while ($true) {
-              try {
-                $tcp = New-Object Net.Sockets.TcpClient
-                $tcp.Connect("127.0.0.1", 3389)
-                $tcp.Close()
-              } catch { }
               Start-Sleep -Seconds 30
+              $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
+              if (-not $boreProc) {
+                Write-Host "Bore stopped. Restarting..."
+                $currentPort = Start-Bore
+              }
             }
           }
-          Start-Job -ScriptBlock $keepAlive | Out-Null
 
-          # Start bore for the first time
-          $currentPort = Start-Bore
-          if (-not $currentPort) {
-            Write-Host "ERROR: Could not start bore."
-            exit 1
+          # Wait until connection.txt is created (max 30 seconds)
+          Write-Host "Waiting for tunnel to be ready..."
+          $wait = 0
+          while (-not (Test-Path "connection.txt") -and $wait -lt 30) {
+            Start-Sleep -Seconds 2
+            $wait += 2
           }
 
-          # Monitoring loop (restart bore if it dies)
-          while ($true) {
-            Start-Sleep -Seconds 30
-            $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-            if (-not $boreProc) {
-              Write-Host "Bore stopped. Restarting..."
-              $currentPort = Start-Bore
-            }
-          }
-          '@
-
-          # Save script to file
-          $boreScript | Out-File -FilePath "run_bore.ps1" -Encoding utf8
-
-          # Run the script in a background job so workflow can continue
-          $job = Start-Job -FilePath "run_bore.ps1" -Name "BoreTunnel"
-          Write-Host "Bore tunnel started in background job (ID: $($job.Id))."
-
-          # Wait a bit for the first tunnel to come up
-          Start-Sleep -Seconds 10
-          if (-not (Test-Path "connection.txt")) {
-            Write-Host "Waiting for connection.txt..."
-            Start-Sleep -Seconds 10
+          if (Test-Path "connection.txt") {
+            Write-Host "Tunnel is ready."
+          } else {
+            Write-Host "WARNING: connection.txt not found after 30s. Tunnel may have failed."
           }
 
       - name: Update README.md with connection info

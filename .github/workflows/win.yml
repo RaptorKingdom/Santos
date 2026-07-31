@@ -1,4 +1,4 @@
-name: Windows RDP with bore (Tested)
+name: Windows RDP with bore (Stable)
 
 on:
   workflow_dispatch:
@@ -42,69 +42,67 @@ jobs:
             exit 1
           }
 
-          # بررسی وضعیت سرویس RDP
-          $rdpService = Get-Service TermService -ErrorAction SilentlyContinue
-          if ($rdpService.Status -ne 'Running') {
-            Start-Service TermService
-            Write-Host "TermService started."
-          }
-          # مطمئن شویم RDP روی 0.0.0.0:3389 گوش می‌دهد
-          $netstat = netstat -an | Select-String ":3389"
-          Write-Host "RDP listening: $netstat"
+          # Ensure TermService is running
+          Get-Service TermService | Start-Service
 
-      - name: Start bore tunnel
+      - name: Start bore tunnel with keep-alive
         shell: powershell
         run: |
           $outLog = "bore_out.log"
           $errLog = "bore_err.log"
 
-          Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-            -ArgumentList "local", "3389", "--to", "bore.pub" `
-            -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-
-          Write-Host "Waiting for tunnel..."
-          Start-Sleep -Seconds 8
-
-          $tunnelPort = $null
-          for ($i=1; $i -le 10; $i++) {
-            if (Test-Path $outLog) {
-              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
-              $clean = $raw -replace '\x1b\[[0-9;]*m', ''
-              if ($clean -match 'listening at [\w\.]+:(\d+)') {
-                $tunnelPort = $matches[1]
-                break
-              }
+          # Function to start bore and extract port
+          function Start-BoreTunnel {
+            Start-Process -NoNewWindow -FilePath ".\bore.exe" `
+              -ArgumentList "local", "3389", "--to", "bore.pub" `
+              -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+            Start-Sleep -Seconds 8
+            $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+            $clean = $raw -replace '\x1b\[[0-9;]*m', ''
+            if ($clean -match 'listening at [\w\.]+:(\d+)') {
+              return $matches[1]
             }
-            Write-Host "Attempt $i/10..."
-            Start-Sleep -Seconds 5
+            return $null
           }
 
-          if (-not $tunnelPort) {
-            Write-Host "ERROR: Could not extract port."
-            Write-Host "=== stdout ==="
-            if (Test-Path $outLog) { Get-Content $outLog }
-            Write-Host "=== stderr ==="
-            if (Test-Path $errLog) { Get-Content $errLog }
+          $port = Start-BoreTunnel
+          if (-not $port) {
+            Write-Host "ERROR: Could not start bore."
             exit 1
           }
 
-          @"
-          host=bore.pub
-          port=$tunnelPort
-          "@ | Out-File -FilePath connection.txt -Encoding utf8
+          "host=bore.pub`nport=$port" | Out-File -FilePath connection.txt -Encoding utf8
+          Write-Host "Tunnel established on port $port."
 
-          Write-Host "Tunnel established on port $tunnelPort."
+          # Start keep-alive job (send TCP probe every 30 seconds)
+          $keepAliveScript = {
+            param($port)
+            while ($true) {
+              try {
+                $tcp = New-Object Net.Sockets.TcpClient
+                $tcp.Connect("127.0.0.1", 3389)
+                $tcp.Close()
+              } catch { }
+              Start-Sleep -Seconds 30
+            }
+          }
+          Start-Job -ScriptBlock $keepAliveScript -ArgumentList $port | Out-Null
 
-          # تست اتصال TCP از خود رانر به تونل
-          Write-Host "Testing tunnel connection..."
-          $testResult = Test-NetConnection -ComputerName bore.pub -Port $tunnelPort -InformationLevel Quiet -WarningAction SilentlyContinue
-          if (-not $testResult) {
-            Write-Host "WARNING: Tunnel test failed, but tunnel might still work."
-          } else {
-            Write-Host "Tunnel test SUCCESS - bore.pub:$tunnelPort is reachable."
+          # Monitor bore process and restart if needed, update port
+          while ($true) {
+            Start-Sleep -Seconds 30
+            $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
+            if (-not $boreProc) {
+              Write-Host "Bore stopped. Restarting..."
+              $port = Start-BoreTunnel
+              if ($port) {
+                "host=bore.pub`nport=$port" | Out-File -FilePath connection.txt -Encoding utf8
+                Write-Host "Tunnel re-established on port $port."
+              }
+            }
           }
 
-      - name: Display connection info
+      - name: Display connection info (initial)
         shell: powershell
         run: |
           $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
@@ -121,35 +119,18 @@ jobs:
           Write-Host "In Microsoft Remote Desktop on Android:"
           Write-Host "  PC Name: $($details.host):$($details.port)"
           Write-Host "  User Name: ${{ secrets.RDP_USERNAME }}"
+          Write-Host "  (Check logs if port changes later)"
           Write-Host ""
 
-      - name: Keep session alive (with health checks)
+      - name: Keep session alive (fallback)
         shell: powershell
         run: |
           $duration = [int]${{ github.event.inputs.session_minutes }}
           $endTime = (Get-Date).AddMinutes($duration)
-
           Write-Host "Session will stay active for $duration minutes."
           while ((Get-Date) -lt $endTime) {
             $remaining = ($endTime - (Get-Date)).ToString("hh\:mm\:ss")
             Write-Host "Remaining $remaining | $(Get-Date -Format 'HH:mm:ss')"
-
-            # هر ۵ دقیقه سلامت تونل و RDP را بررسی کن
-            if ((Get-Date).Minute % 5 -eq 0) {
-              # بررسی اجرای bore
-              $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-              if (-not $boreProc) {
-                Write-Host "Tunnel lost. Restarting..."
-                Start-Process -NoNewWindow -FilePath ".\bore.exe" `
-                  -ArgumentList "local", "3389", "--to", "bore.pub"
-              }
-              # بررسی سرویس RDP
-              $rdp = Get-Service TermService -ErrorAction SilentlyContinue
-              if ($rdp.Status -ne 'Running') {
-                Write-Host "RDP service stopped. Restarting..."
-                Start-Service TermService
-              }
-            }
             Start-Sleep -Seconds 60
           }
           Write-Host "Time is up."

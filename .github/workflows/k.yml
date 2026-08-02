@@ -1,0 +1,178 @@
+name: V2Ray Server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-v2ray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq openssh-client
+
+      - name: Download cloudflared
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+
+      - name: Download Xray-core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DOWNLOAD_URL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/XTLS/Xray-core/releases/latest | \
+            jq -r '.assets[] | select(.name == "Xray-linux-64.zip") | .browser_download_url')
+
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "❌ دریافت لینک دانلود ناموفق بود"
+            exit 1
+          fi
+
+          echo "📥 دانلود از: $DOWNLOAD_URL"
+          curl -L "$DOWNLOAD_URL" -o xray.zip
+          unzip xray.zip -d xray
+          chmod +x xray/xray
+
+      - name: Setup tunnel (trycloudflare or localhost.run)
+        id: tunnel
+        run: |
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          PORT=$((10000 + RANDOM % 50000))
+          echo "UUID=$UUID" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+
+          # --- تلاش برای trycloudflare ---
+          echo "🌐 تلاش برای trycloudflare..."
+          ./cloudflared tunnel --url http://localhost:$PORT --no-autoupdate > tunnel.log 2>&1 &
+          CLOUDFLARED_PID=$!
+          sleep 5
+
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            if ! kill -0 $CLOUDFLARED_PID 2>/dev/null; then
+              echo "⛔ پروسه cloudflared از بین رفت"
+              cat tunnel.log
+              break
+            fi
+            if grep -q 'trycloudflare.com' tunnel.log; then
+              TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' tunnel.log | head -n1)
+              echo "✅ trycloudflare URL دریافت شد: $TUNNEL_URL"
+              break
+            fi
+            sleep 2
+          done
+
+          # اگر trycloudflare شکست خورد → fallback به localhost.run
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "⚠️ trycloudflare شکست خورد، رفتن به localhost.run..."
+            kill $CLOUDFLARED_PID 2>/dev/null || true
+
+            # اجرای تونل SSH در پس‌زمینه
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 80:localhost:$PORT nokey@localhost.run > ssh_tunnel.log 2>&1 &
+            SSH_PID=$!
+            sleep 5
+
+            for i in $(seq 1 30); do
+              if ! kill -0 $SSH_PID 2>/dev/null; then
+                echo "⛔ پروسه SSH از بین رفت"
+                cat ssh_tunnel.log
+                exit 1
+              fi
+              if grep -q 'https://' ssh_tunnel.log; then
+                TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.lhrtunnel\.link' ssh_tunnel.log | head -n1)
+                echo "✅ localhost.run URL دریافت شد: $TUNNEL_URL"
+                break
+              fi
+              sleep 2
+            done
+          fi
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ هیچ تونلی در دسترس نیست"
+            exit 1
+          fi
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+
+      - name: Create Xray server config
+        run: |
+          cat > xray/config.json <<EOF
+          {
+            "inbounds": [{
+              "port": $PORT,
+              "protocol": "vmess",
+              "settings": {
+                "clients": [{
+                  "id": "$UUID",
+                  "alterId": 0
+                }]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                  "path": "/"
+                }
+              }
+            }],
+            "outbounds": [{
+              "protocol": "freedom",
+              "settings": {}
+            }]
+          }
+          EOF
+
+      - name: Start Xray
+        run: |
+          nohup ./xray/xray run -config xray/config.json &
+          sleep 3
+          if ! pgrep -f "xray/xray" > /dev/null; then
+            echo "❌ Xray اجرا نشد"
+            exit 1
+          fi
+          echo "✅ Xray در حال اجراست"
+
+      - name: Generate VMess URI and update README
+        run: |
+          HOSTNAME="${TUNNEL_URL#https://}"
+          
+          CONFIG_JSON=$(jq -n \
+            --arg v "2" \
+            --arg ps "GitHub-V2Ray" \
+            --arg add "$HOSTNAME" \
+            --arg port "443" \
+            --arg id "$UUID" \
+            --arg aid "0" \
+            --arg net "ws" \
+            --arg type "none" \
+            --arg host "$HOSTNAME" \
+            --arg path "/" \
+            --arg tls "tls" \
+            '{v: $v, ps: $ps, add: $add, port: $port, id: $id, aid: $aid, net: $net, type: $type, host: $host, path: $path, tls: $tls}')
+          
+          VMESS_URI="vmess://$(echo -n "$CONFIG_JSON" | base64 -w0)"
+          echo "🔗 VMess URI: $VMESS_URI"
+
+          echo -e "\n## 🌍 V2Ray Server (فعال تا $(date -u -d '+6 hours' '+%Y-%m-%d %H:%M UTC'))\n\n\`\`\`\n${VMESS_URI}\n\`\`\`\n" >> README.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "🔄 به‌روزرسانی لینک V2Ray" || echo "بدون تغییر جدید"
+          git push
+
+      - name: Keep server alive for 6 hours
+        run: |
+          echo "⏳ سرور تا ۶ ساعت دیگر فعال خواهد ماند..."
+          sleep 21600

@@ -19,13 +19,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------- نصب و اجرای سرور MTProto (mtg) ----------
-      - name: Install and run mtg server
+      # ---------- اجرای سرور MTProto (mtg.exe) از فایل موجود ----------
+      - name: Run mtg server
         shell: powershell
         run: |
-          # دانلود mtg (پروکسی فوق‌سبک با پشتیبانی از Fake TLS)
-          Invoke-WebRequest -Uri "https://github.com/9seconds/mtg/releases/latest/download/mtg-windows-amd64.exe" -OutFile "mtg.exe"
-
           # تولید سکرت (کلید) تصادفی ۱۶ بایتی به صورت هگز
           $bytes = New-Object byte[] 16
           (New-Object Random).NextBytes($bytes)
@@ -35,8 +32,7 @@ jobs:
           # ذخیره سکرت در فایل برای مرحله بعد
           $secret | Out-File -FilePath secret.txt -Encoding utf8 -NoNewline
 
-          # اجرای mtg روی پورت محلی 8080 با Fake TLS به دامنه cloudflare.com
-          # (اجرا در پس‌زمینه با Start-Process)
+          # اجرای mtg.exe از ریشه مخزن (فرض می‌کنیم فایل موجود است)
           Start-Process -NoNewWindow -FilePath ".\mtg.exe" -ArgumentList "run --bind 127.0.0.1:8080 --secret $secret --fake-tls --domain cloudflare.com"
           
           # صبر برای اطمینان از بالا آمدن سرویس
@@ -95,13 +91,10 @@ jobs:
           $lines | Out-File -FilePath bore_runner.ps1 -Encoding utf8
           Write-Host "bore_runner.ps1 created."
 
-      # ---------- دانلود bore و اجرا ----------
-      - name: Download bore and start tunnel
+      # ---------- اجرای bore ----------
+      - name: Start bore tunnel (detached)
         shell: powershell
         run: |
-          # دانلود bore.exe
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/latest/download/bore-windows-x86_64.exe" -OutFile "bore.exe"
-
           # اجرای bore_runner در پس‌زمینه
           Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "bore_runner.ps1" -WindowStyle Hidden
           Write-Host "Bore runner started in background."

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       session_minutes:
-        description: 'مدت زمان فعال بودن پروکسی (دقیقه)'
+        description: 'Session duration in minutes'
         required: true
         default: '120'
 
@@ -19,27 +19,26 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------- اجرای سرور MTProto (mtg.exe) از فایل موجود ----------
+      # ---------- Run mtg server from repo file ----------
       - name: Run mtg server
         shell: powershell
         run: |
-          # تولید سکرت (کلید) تصادفی ۱۶ بایتی به صورت هگز
+          # Generate random 16-byte hex secret
           $bytes = New-Object byte[] 16
           (New-Object Random).NextBytes($bytes)
           $secret = -join ($bytes | ForEach-Object { $_.ToString('x2') })
           Write-Host "SECRET: $secret"
 
-          # ذخیره سکرت در فایل برای مرحله بعد
+          # Save secret for later
           $secret | Out-File -FilePath secret.txt -Encoding utf8 -NoNewline
 
-          # اجرای mtg.exe از ریشه مخزن (فرض می‌کنیم فایل موجود است)
+          # Start mtg.exe (must be in repo root)
           Start-Process -NoNewWindow -FilePath ".\mtg.exe" -ArgumentList "run --bind 127.0.0.1:8080 --secret $secret --fake-tls --domain cloudflare.com"
           
-          # صبر برای اطمینان از بالا آمدن سرویس
           Start-Sleep -Seconds 5
           Write-Host "MTG server started on localhost:8080"
 
-      # ---------- ساخت اسکریپت bore_runner (دقیقاً مشابه کد شما) ----------
+      # ---------- Create bore runner script (all comments in English) ----------
       - name: Create bore runner script
         shell: powershell
         run: |
@@ -63,7 +62,7 @@ jobs:
             '  return $null',
             '}',
             '',
-            '# Keep-alive probe every 30s (چک کردن زنده بودن پروکسی محلی)',
+            '# Keep-alive probe every 30s (check local proxy health)',
             'Start-Job -ScriptBlock {',
             '  while ($true) {',
             '    try { $tcp = New-Object Net.Sockets.TcpClient; $tcp.Connect("127.0.0.1", 8080); $tcp.Close() } catch { }',
@@ -78,7 +77,7 @@ jobs:
             '  exit 1',
             '}',
             '',
-            '# Monitor loop (در صورت قطع شدن دوباره راه‌اندازی کن)',
+            '# Monitor loop (restart if bore dies)',
             'while ($true) {',
             '  Start-Sleep -Seconds 30',
             '  $boreProc = Get-Process -Name "bore" -ErrorAction SilentlyContinue',
@@ -91,15 +90,13 @@ jobs:
           $lines | Out-File -FilePath bore_runner.ps1 -Encoding utf8
           Write-Host "bore_runner.ps1 created."
 
-      # ---------- اجرای bore ----------
+      # ---------- Start bore tunnel ----------
       - name: Start bore tunnel (detached)
         shell: powershell
         run: |
-          # اجرای bore_runner در پس‌زمینه
           Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "bore_runner.ps1" -WindowStyle Hidden
           Write-Host "Bore runner started in background."
 
-          # صبر برای تولید connection.txt
           Write-Host "Waiting for tunnel to be ready..."
           for ($i=0; $i -lt 30; $i++) {
             if (Test-Path "connection.txt") { break }
@@ -111,7 +108,7 @@ jobs:
             Write-Host "WARNING: Tunnel may not have started. Will try to continue."
           }
 
-      # ---------- به‌روزرسانی README با لینک پروکسی ----------
+      # ---------- Update README.md with proxy link ----------
       - name: Update README.md
         shell: powershell
         run: |
@@ -121,22 +118,19 @@ jobs:
           }
 
           $details = Get-Content connection.txt -Raw | ConvertFrom-StringData
-          $hostAddr = $details.host   # = bore.pub
+          $hostAddr = $details.host
           $port = $details.port
 
-          # خواندن سکرت از فایل
           $secret = Get-Content secret.txt -Raw -ErrorAction SilentlyContinue
           if (-not $secret) {
             Write-Host "ERROR: secret.txt not found."
             exit 1
           }
 
-          # ساخت لینک tg://
           $tgLink = "tg://proxy?server=$hostAddr&port=$port&secret=$secret"
 
           $expiry = (Get-Date).AddMinutes(${{ github.event.inputs.session_minutes }}).ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
 
-          # ساخت بخش جدید README
           $newSection = "## MTProto Proxy Access`r`n"
           $newSection += "**Connection Link:** ``$tgLink``  `r`n"
           $newSection += "**Server:** `$hostAddr`  `r`n"
@@ -158,7 +152,7 @@ jobs:
           $readmeContent | Out-File -FilePath "README.md" -Encoding utf8
           Write-Host "README.md updated."
 
-      # ---------- ارسال تغییرات به مخزن ----------
+      # ---------- Commit and push README.md ----------
       - name: Commit and push README.md
         shell: powershell
         run: |
@@ -170,7 +164,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------- نمایش اطلاعات نهایی ----------
+      # ---------- Display connection info ----------
       - name: Display connection info
         shell: powershell
         run: |
@@ -188,10 +182,10 @@ jobs:
           Write-Host "  Link: $tgLink"
           Write-Host "======================================================"
           Write-Host ""
-          Write-Host "لینک بالا را در تلگرام (هر دستگاهی) باز کنید تا پروکسی تنظیم شود."
-          Write-Host "اطلاعات در README.md مخزن نیز ذخیره شد."
+          Write-Host "Open the above link in Telegram (any device) to set up the proxy."
+          Write-Host "Info also saved in README.md."
 
-      # ---------- نگه‌داشتن سشن تا پایان زمان ----------
+      # ---------- Keep session alive until timeout ----------
       - name: Keep session alive
         shell: powershell
         run: |
